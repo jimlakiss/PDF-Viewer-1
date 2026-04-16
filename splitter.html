@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PDF Viewer — CD iQs</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+
+  <style>
+    /* ── Reset & base ───────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:        #1a1a2e;
+      --surface:   #16213e;
+      --panel:     #0f3460;
+      --accent:    #4da3ff;
+      --accent-dk: #2a7de1;
+      --text:      #e0e0e0;
+      --text-dim:  #9aa0b0;
+      --border:    rgba(255,255,255,0.10);
+      --border-md: rgba(255,255,255,0.18);
+      --ok:        #27ae60;  --ok-bg:   rgba(39,174,96,0.15);
+      --warn:      #e67e22;  --warn-bg: rgba(230,126,34,0.15);
+      --fail:      #e74c3c;  --fail-bg: rgba(231,76,60,0.15);
+      --radius:    6px;
+      --font:      system-ui, -apple-system, sans-serif;
+      --mono:      'Menlo', 'Consolas', monospace;
+    }
+    html, body { height: 100%; font-family: var(--font); font-size: 14px; background: var(--bg); color: var(--text); }
+
+    /* ── Layout ─────────────────────────────────────────── */
+    #app { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+    /* Top toolbar */
+    #toolbar {
+      flex: 0 0 auto;
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 8px 14px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      z-index: 10;
+    }
+    .toolbar-logo {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 13px; font-weight: 600; color: var(--text);
+      margin-right: 6px;
+    }
+    .toolbar-logo img { width: 28px; height: 28px; border-radius: 4px; }
+    .toolbar-sep { width: 1px; height: 24px; background: var(--border-md); flex-shrink: 0; }
+    .toolbar-label { font-size: 11px; color: var(--text-dim); }
+
+    /* Inputs & selects in toolbar */
+    #toolbar input[type="text"],
+    #toolbar select {
+      background: var(--panel); border: 1px solid var(--border-md);
+      color: var(--text); border-radius: var(--radius);
+      padding: 4px 8px; font-size: 12px; height: 30px;
+    }
+    #toolbar input[type="text"]::placeholder { color: var(--text-dim); }
+    #toolbar select { cursor: pointer; }
+
+    /* File upload button */
+    #file-input { display: none; }
+    .upload-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--panel); border: 1px solid var(--border-md);
+      color: var(--text); border-radius: var(--radius);
+      padding: 5px 12px; font-size: 12px; cursor: pointer; height: 30px;
+      transition: background 0.15s;
+    }
+    .upload-btn:hover { background: var(--accent-dk); border-color: var(--accent); }
+
+    /* Action buttons */
+    .btn {
+      display: inline-flex; align-items: center; gap: 5px;
+      border-radius: var(--radius); padding: 5px 12px;
+      font-size: 12px; font-family: var(--font); cursor: pointer; height: 30px;
+      border: 1px solid var(--border-md); transition: background 0.15s;
+    }
+    .btn-default { background: var(--panel); color: var(--text); }
+    .btn-default:hover { background: #1e4a8a; }
+    .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent-dk); font-weight: 600; }
+    .btn-primary:hover { background: var(--accent-dk); }
+    .btn-split { background: #1a6b3c; color: #fff; border-color: #22854c; font-weight: 600; }
+    .btn-split:hover { background: #22854c; }
+
+    #page-indicator { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+
+    /* Draw type swatch */
+    #draw-type-swatch[data-swatch="sheet_id"]          { color: #4da3ff; }
+    #draw-type-swatch[data-swatch="description"]        { color: #f39c12; }
+    #draw-type-swatch[data-swatch="issue_id"]           { color: #2ecc71; }
+    #draw-type-swatch[data-swatch="date"]               { color: #e74c3c; }
+    #draw-type-swatch[data-swatch="issue_description"]  { color: #9b59b6; }
+    #draw-type-swatch[data-swatch="prepared_by"]        { color: #1abc9c; }
+    #draw-type-swatch[data-swatch="project_id"]         { color: #e67e22; }
+    #draw-type-swatch { font-size: 11px; font-weight: 700; min-width: 60px; }
+
+    /* ── Main viewer area ───────────────────────────────── */
+    #main-body { flex: 1 1 auto; display: flex; overflow: hidden; }
+
+    #sidebar {
+      width: 130px; flex: 0 0 130px;
+      overflow-y: auto; overflow-x: hidden;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      padding: 8px 6px;
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    #sidebar .thumb {
+      width: 100%; aspect-ratio: 1 / 1.414;
+      cursor: pointer;
+      border: 2px solid transparent;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    #sidebar .thumb img { width: 100%; height: auto; display: block; }
+
+    #pdf-scroll {
+      flex: 1 1 auto;
+      overflow: auto;
+      background: #111;
+      position: relative;
+    }
+    #canvas-wrap { position: relative; display: inline-block; }
+    #pdf-canvas  { display: block; }
+    #overlay {
+      position: absolute; top: 0; left: 0;
+      cursor: crosshair; overflow: visible;
+    }
+
+    /* SVG region colours — must match pdf_viewer.js swatch mapping */
+    #overlay rect                             { fill: rgba(77,163,255,0.15); stroke: #4da3ff; stroke-width: 2; }
+    #overlay rect[data-type="description"]    { fill: rgba(243,156,18,0.15); stroke: #f39c12; }
+    #overlay rect[data-type="issue_id"]       { fill: rgba(46,204,113,0.15); stroke: #2ecc71; }
+    #overlay rect[data-type="date"]           { fill: rgba(231,76,60,0.15);  stroke: #e74c3c; }
+    #overlay rect[data-type="issue_description"] { fill: rgba(155,89,182,0.15); stroke: #9b59b6; }
+    #overlay rect[data-type="prepared_by"]    { fill: rgba(26,188,156,0.15); stroke: #1abc9c; }
+    #overlay rect[data-type="project_id"]     { fill: rgba(230,126,34,0.15); stroke: #e67e22; }
+    #overlay rect.selected                    { stroke-width: 3; filter: brightness(1.3); }
+
+    /* ── Processing overlay ─────────────────────────────── */
+    #processing-overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.72);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 9000; font-family: var(--font);
+    }
+    .proc-box {
+      background: var(--surface); border: 1px solid var(--border-md);
+      border-radius: 10px; padding: 28px 44px;
+      font-size: 16px; font-weight: 500; color: var(--text);
+    }
+
+    /* ────────────────────────────────────────────────────────────────────
+       STAGING PANEL
+       Sits as a fixed overlay above the main viewer.
+    ──────────────────────────────────────────────────────────────────── */
+    #staging-panel {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(10,10,20,0.82);
+      z-index: 8000;
+      align-items: center; justify-content: center;
+      padding: 20px;
+    }
+    .sp-container {
+      background: var(--surface);
+      border: 1px solid var(--border-md);
+      border-radius: 10px;
+      width: 100%; max-width: 1080px;
+      max-height: 90vh;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Header row */
+    .sp-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .sp-header h2 { font-size: 15px; font-weight: 600; }
+    .sp-header .sp-meta { font-size: 12px; color: var(--text-dim); }
+
+    /* Toolbar row */
+    .sp-toolbar {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 10px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
+      flex-shrink: 0;
+    }
+    .sp-toolbar label { font-size: 12px; color: var(--text-dim); }
+    .sp-toolbar select,
+    .sp-toolbar input[type="text"] {
+      background: var(--panel); border: 1px solid var(--border-md);
+      color: var(--text); border-radius: var(--radius);
+      padding: 4px 8px; font-size: 12px; height: 28px;
+    }
+    .sp-toolbar select { cursor: pointer; }
+    #sp-custom-row { display: none; align-items: center; gap: 8px; }
+    #sp-custom-input { width: 280px; font-family: var(--mono); font-size: 11px; }
+
+    /* Table scroll area */
+    .sp-scroll { flex: 1 1 auto; overflow-y: auto; overflow-x: auto; }
+
+    table.sp-table {
+      width: 100%; border-collapse: collapse; font-size: 13px;
+    }
+    table.sp-table thead th {
+      position: sticky; top: 0;
+      background: var(--panel);
+      padding: 8px 10px;
+      text-align: left; font-weight: 500; font-size: 11px;
+      color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em;
+      border-bottom: 1px solid var(--border-md);
+    }
+    table.sp-table tbody tr { border-bottom: 1px solid var(--border); }
+    table.sp-table tbody tr:last-child { border-bottom: none; }
+    table.sp-table tbody tr:hover { background: rgba(255,255,255,0.03); }
+    table.sp-table tbody tr.sp-row-warn { background: var(--warn-bg); }
+    table.sp-table tbody tr.sp-row-fail { background: var(--fail-bg); }
+    table.sp-table td { padding: 6px 10px; vertical-align: middle; }
+
+    .sp-td-check  { width: 32px; text-align: center; }
+    .sp-td-pg     { width: 36px; font-size: 11px; color: var(--text-dim); text-align: center; }
+    .sp-td-rev    { width: 80px; }
+    .sp-td-status { width: 90px; }
+
+    .sp-cell {
+      width: 100%; background: transparent;
+      border: 1px solid transparent; border-radius: 4px;
+      color: var(--text); font-size: 13px; font-family: var(--font);
+      padding: 3px 6px;
+    }
+    .sp-cell:hover { border-color: var(--border-md); background: var(--panel); }
+    .sp-cell:focus { outline: none; border-color: var(--accent); background: var(--panel); }
+    .sp-cell::placeholder { color: var(--text-dim); }
+
+    .sp-preview {
+      font-family: var(--mono); font-size: 11px;
+      color: var(--text-dim);
+      display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      max-width: 280px;
+    }
+
+    .sp-badge {
+      display: inline-block; font-size: 11px; font-weight: 600;
+      padding: 2px 9px; border-radius: 999px;
+    }
+    .sp-ok   { background: var(--ok-bg);   color: var(--ok);   }
+    .sp-warn { background: var(--warn-bg); color: var(--warn); }
+    .sp-fail { background: var(--fail-bg); color: var(--fail); }
+
+    /* Footer row */
+    .sp-footer {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 20px; flex-wrap: wrap; gap: 10px;
+      border-top: 1px solid var(--border);
+      background: var(--bg);
+      flex-shrink: 0;
+    }
+    #sp-stats { font-size: 12px; color: var(--text-dim); }
+    .sp-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    .sp-btn {
+      display: inline-flex; align-items: center; gap: 5px;
+      border-radius: var(--radius); padding: 7px 14px;
+      font-size: 12px; font-family: var(--font); cursor: pointer; font-weight: 500;
+      border: 1px solid var(--border-md); transition: background 0.15s;
+    }
+    .sp-btn-ghost  { background: transparent; color: var(--text); }
+    .sp-btn-ghost:hover  { background: var(--panel); }
+    .sp-btn-csv    { background: var(--panel); color: #f39c12; border-color: rgba(243,156,18,0.4); }
+    .sp-btn-csv:hover   { background: rgba(243,156,18,0.15); }
+    .sp-btn-json   { background: var(--panel); color: #9b59b6; border-color: rgba(155,89,182,0.4); }
+    .sp-btn-json:hover  { background: rgba(155,89,182,0.15); }
+    .sp-btn-zip    { background: #1a6b3c; color: #fff; border-color: #22854c; font-weight: 700; }
+    .sp-btn-zip:hover  { background: #22854c; }
+
+    /* ── Drag-and-drop row reordering ───────────────────── */
+    .sp-drag-handle {
+      cursor: grab; color: var(--text-dim);
+      padding: 0 6px; font-size: 16px; line-height: 1;
+      user-select: none; -webkit-user-select: none;
+    }
+    .sp-drag-handle:hover { color: var(--text); }
+    tr[draggable="true"]:active .sp-drag-handle { cursor: grabbing; }
+
+    tr.sp-dragging { opacity: 0.35; background: var(--panel) !important; }
+
+    /* Insertion line — shows above or below the target row */
+    tr.sp-drop-above td { border-top: 2px solid var(--accent) !important; }
+    tr.sp-drop-below td { border-bottom: 2px solid var(--accent) !important; }
+
+    /* Sequence number toggle */
+    .sp-seq-toggle {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; color: var(--text-dim); cursor: pointer;
+    }
+    .sp-seq-toggle input[type="checkbox"] { cursor: pointer; }
+    .sp-seq-on { color: var(--accent); font-weight: 600; }
+
+    /* Seq prefix badge in filename preview */
+    .sp-seq-prefix { color: var(--accent); font-weight: 700; }
+  </style>
+</head>
+
+<body>
+<div id="app">
+
+  <!-- ── TOP TOOLBAR ─────────────────────────────────────────── -->
+  <div id="toolbar">
+
+    <div class="toolbar-logo">
+      <img src="favicon.svg" alt="">
+      CD iQs — PDF Viewer
+    </div>
+
+    <div class="toolbar-sep"></div>
+
+    <!-- File upload -->
+    <input type="file" id="file-input" accept=".pdf" multiple>
+    <label for="file-input" class="upload-btn">
+      ↑ Upload PDF(s)
+    </label>
+    <span class="toolbar-label">bound or loose</span>
+
+    <div class="toolbar-sep"></div>
+
+    <!-- Document-level fields -->
+    <input type="text" id="prepared-by"  placeholder="Prepared by" style="width:130px">
+    <input type="text" id="project-id"   placeholder="Project ID"  style="width:110px">
+
+    <div class="toolbar-sep"></div>
+
+    <!-- Region type selector -->
+    <label class="toolbar-label">Region:</label>
+    <select id="region-type" style="width:150px"></select>
+    <span id="draw-type-swatch">■</span>
+
+    <div class="toolbar-sep"></div>
+
+    <!-- Extract (document fields only) -->
+    <button class="btn btn-default" onclick="extractAll()">Extract fields</button>
+
+    <!-- Split & Name — the main new action -->
+    <button class="btn btn-split" id="btn-split-name">✦ Split &amp; Name</button>
+
+    <div class="toolbar-sep"></div>
+
+    <!-- Legacy exports (raw data, not manifest) -->
+    <button class="btn btn-default" onclick="downloadJSON()">JSON (raw)</button>
+    <button class="btn btn-default" onclick="downloadCSV()">CSV (raw)</button>
+
+    <div class="toolbar-sep"></div>
+
+    <!-- Zoom + page indicator -->
+    <button id="zoom-out" class="btn btn-default" style="width:30px;padding:0;justify-content:center">−</button>
+    <button id="zoom-in"  class="btn btn-default" style="width:30px;padding:0;justify-content:center">+</button>
+    <span id="page-indicator">Page — / —</span>
+  </div>
+
+  <!-- ── MAIN BODY ──────────────────────────────────────────── -->
+  <div id="main-body">
+
+    <!-- Thumbnail sidebar -->
+    <div id="sidebar"></div>
+
+    <!-- PDF canvas + SVG overlay -->
+    <div id="pdf-scroll">
+      <div id="canvas-wrap">
+        <canvas id="pdf-canvas"></canvas>
+        <svg id="overlay"></svg>
+      </div>
+    </div>
+
+  </div><!-- /#main-body -->
+
+</div><!-- /#app -->
+
+
+<!-- ── STAGING PANEL (overlay) ──────────────────────────────── -->
+<div id="staging-panel">
+  <div class="sp-container">
+
+    <!-- Header -->
+    <div class="sp-header">
+      <h2>Staging area — review &amp; edit filenames</h2>
+      <span class="sp-meta">—</span>
+    </div>
+
+    <!-- Controls toolbar -->
+    <div class="sp-toolbar">
+      <label>Template:</label>
+      <select id="sp-template-select" style="width:280px"></select>
+
+      <div id="sp-custom-row">
+        <label>Custom:</label>
+        <input type="text" id="sp-custom-input" placeholder="{sheet_id} - {description} - {issue_id}">
+        <span style="font-size:11px;color:#9aa0b0;">tokens: {sheet_id} {description} {issue_id} {date} {issue_description} {project_id}</span>
+      </div>
+
+      <div style="margin-left:auto;display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+
+        <!-- Sequence prefix toggle -->
+        <label class="sp-seq-toggle" title="Prefix each filename with 001, 002… to force CostX import order">
+          <input type="checkbox" id="sp-seq-toggle" checked>
+          <span id="sp-seq-label" class="sp-seq-on">Sequence prefix</span>
+        </label>
+
+        <!-- Separator for sequence prefix -->
+        <span id="sp-seq-sep-row" style="display:flex;align-items:center;gap:6px;">
+          <label style="font-size:12px;color:var(--text-dim)">Sep:</label>
+          <select id="sp-seq-sep" style="width:60px">
+            <option value=" - "> - </option>
+            <option value="_">_</option>
+          </select>
+        </span>
+
+        <!-- Reset order -->
+        <button class="sp-btn sp-btn-ghost" id="sp-btn-reset" title="Restore original page number order" style="font-size:11px">↺ Reset order</button>
+
+        <label>Show:</label>
+        <select id="sp-filter-select" style="width:130px">
+          <option value="all">All sheets</option>
+          <option value="issues">Needs review</option>
+          <option value="ready">Ready only</option>
+        </select>
+        <button class="sp-btn sp-btn-ghost" id="sp-btn-close">✕ Close</button>
+      </div>
+    </div>
+
+    <!-- Scrollable table -->
+    <div class="sp-scroll">
+      <table class="sp-table">
+        <thead>
+          <tr>
+            <th style="width:28px"></th><!-- drag handle -->
+            <th class="sp-td-check">
+              <input type="checkbox" id="sp-select-all" checked title="Select / deselect all">
+            </th>
+            <th class="sp-td-pg">Pg</th>
+            <th style="width:100px">Sheet ID</th>
+            <th>Description</th>
+            <th class="sp-td-rev">Revision</th>
+            <th>Filename</th>
+            <th class="sp-td-status">Status</th>
+          </tr>
+        </thead>
+        <tbody id="sp-tbody">
+          <tr>
+            <td colspan="7" style="text-align:center;padding:32px;color:var(--text-dim)">
+              Upload a PDF and click <strong>✦ Split &amp; Name</strong> to extract and stage filenames.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Footer actions -->
+    <div class="sp-footer">
+      <span id="sp-stats" style="font-size:12px;color:var(--text-dim)">—</span>
+      <div class="sp-actions">
+        <button class="sp-btn sp-btn-csv"  id="sp-btn-csv">  ⬇ Export CSV</button>
+        <button class="sp-btn sp-btn-json" id="sp-btn-json"> ⬇ Export JSON</button>
+        <button class="sp-btn sp-btn-zip"  id="sp-btn-zip">  Download ZIP (—)</button>
+      </div>
+    </div>
+
+  </div>
+</div><!-- /#staging-panel -->
+
+
+<!-- ── SCRIPTS ───────────────────────────────────────────────── -->
+<!--  Load order matters: pdf.js → tesseract → pdf-lib → jszip → viewer → splitter  -->
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://unpkg.com/tesseract.js@5.0.4/dist/tesseract.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+
+<script src="pdf_viewer.js"></script>
+<script src="pdf_splitter.js"></script>
+
+</body>
+</html>
