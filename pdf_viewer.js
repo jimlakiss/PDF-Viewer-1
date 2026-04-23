@@ -6,6 +6,7 @@ const DOCUMENT_DETAILS = ["prepared_by", "project_id"];
 const REGION_TYPES = ["sheet_id", "description", "issue_id", "date", "issue_description"];
 
 const fileInput = document.getElementById("file-input");
+const uploadDropZone = document.getElementById("upload-drop-zone");
 const canvas = document.getElementById("pdf-canvas");
 const ctx = canvas.getContext("2d");
 const sidebar = document.getElementById("sidebar");
@@ -228,16 +229,22 @@ function runOcrExclusive(fn) {
   syncDrawTypeSwatch();
 })();
 
-fileInput?.addEventListener("change", async (e) => {
-  const files = Array.from(e.target.files || []);
+async function handleSelectedPDFs(selectedFiles, source = "picker") {
+  const files = Array.from(selectedFiles || []);
   
-  console.log(`🔍 FILE INPUT CHANGE DETECTED:`);
-  console.log(`   - e.target.files:`, e.target.files);
+  console.log(`🔍 PDF FILES SELECTED (${source}):`);
   console.log(`   - files array length:`, files.length);
   console.log(`   - files array:`, files.map(f => f.name));
   
   if (!files.length) {
     console.log('❌ No files selected');
+    return;
+  }
+
+  const nonPdfFiles = files.filter(file => !/\.pdf$/i.test(file.name || '') && file.type !== 'application/pdf');
+  if (nonPdfFiles.length) {
+    alert(`Only PDF files can be uploaded. Remove: ${nonPdfFiles.map(file => file.name).join(', ')}`);
+    if (fileInput) fileInput.value = '';
     return;
   }
 
@@ -254,7 +261,7 @@ fileInput?.addEventListener("change", async (e) => {
   if (fileSizeMB > 20) {
     console.warn(`⚠️ Large file detected (${fileSizeMB.toFixed(1)} MB)`);
     if (!confirm(`This is a large file (${fileSizeMB.toFixed(1)} MB). Continue?`)) {
-      fileInput.value = '';
+      if (fileInput) fileInput.value = '';
       return;
     }
   }
@@ -325,17 +332,47 @@ fileInput?.addEventListener("change", async (e) => {
     } catch (err) {
       console.error('❌ Error loading PDF:', err);
       alert(`Failed to load PDF: ${err.message}`);
-      fileInput.value = '';
+      if (fileInput) fileInput.value = '';
     }
   };
   
   reader.onerror = () => {
     console.error('❌ Error reading file');
     alert('Failed to read the PDF file');
-    fileInput.value = '';
+    if (fileInput) fileInput.value = '';
   };
   
   reader.readAsArrayBuffer(file);
+}
+
+fileInput?.addEventListener("change", async (e) => {
+  await handleSelectedPDFs(e.target.files, "picker");
+});
+
+function setUploadDragActive(active) {
+  uploadDropZone?.classList.toggle("is-drag-over", active);
+}
+
+["dragenter", "dragover"].forEach(eventName => {
+  uploadDropZone?.addEventListener(eventName, e => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = "copy";
+    setUploadDragActive(true);
+  });
+});
+
+["dragleave", "drop"].forEach(eventName => {
+  uploadDropZone?.addEventListener(eventName, e => {
+    e.preventDefault();
+    e.stopPropagation();
+    setUploadDragActive(false);
+  });
+});
+
+uploadDropZone?.addEventListener("drop", async e => {
+  const files = Array.from(e.dataTransfer?.files || []);
+  await handleSelectedPDFs(files, "drop");
 });
 
 async function loadMultiplePDFs(files) {

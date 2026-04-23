@@ -66,9 +66,15 @@
       background: var(--panel); border: 1px solid var(--border-md);
       color: var(--text); border-radius: var(--radius);
       padding: 5px 12px; font-size: 12px; cursor: pointer; height: 30px;
-      transition: background 0.15s;
+      transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
     }
     .upload-btn:hover { background: var(--accent-dk); border-color: var(--accent); }
+    .upload-btn.is-drag-over {
+      background: var(--accent-dk);
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(77,163,255,0.22);
+    }
+    .upload-hint { color: var(--text-dim); font-size: 11px; }
 
     /* Action buttons */
     .btn {
@@ -202,6 +208,8 @@
     .sp-toolbar select { cursor: pointer; }
     #sp-custom-row { display: none; align-items: center; gap: 8px; }
     #sp-custom-input { width: 280px; font-family: var(--mono); font-size: 11px; }
+    .sp-export-name-row { display: flex; align-items: center; gap: 8px; min-width: min(100%, 360px); }
+    #sp-export-name { width: 260px; font-family: var(--mono); font-size: 11px; }
 
     /* Table scroll area */
     .sp-scroll { flex: 1 1 auto; overflow-y: auto; overflow-x: auto; }
@@ -323,8 +331,8 @@
 
     <!-- File upload -->
     <input type="file" id="file-input" accept=".pdf" multiple>
-    <label for="file-input" class="upload-btn">
-      ↑ Upload PDF(s)
+    <label for="file-input" class="upload-btn" id="upload-drop-zone">
+      ↑ Upload PDF(s) <span class="upload-hint">or drop</span>
     </label>
     <span class="toolbar-label">bound or loose</span>
 
@@ -401,6 +409,11 @@
         <label>Custom:</label>
         <input type="text" id="sp-custom-input" placeholder="{sheet_id} - {description} - {issue_id}">
         <span style="font-size:11px;color:#9aa0b0;">tokens: {sheet_id} {description} {issue_id} {date} {issue_description} {project_id}</span>
+      </div>
+
+      <div class="sp-export-name-row">
+        <label for="sp-export-name">Export name:</label>
+        <input type="text" id="sp-export-name" placeholder="YYMMDD_project_id">
       </div>
 
       <div style="margin-left:auto;display:flex;align-items:center;gap:14px;flex-wrap:wrap;">

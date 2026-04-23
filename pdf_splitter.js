@@ -16,6 +16,7 @@
   let filenameTemplate = '{sheet_id} - {description} - {issue_id}';
   let useSeqPrefix     = true;
   let seqSeparator     = ' - '; // between sequence number and filename
+  let exportBaseName   = '';
 
   const PRESETS = [
     { label: 'Sheet · Description · Revision',           value: '{sheet_id} - {description} - {issue_id}' },
@@ -49,6 +50,24 @@
       .replace(/[/\\:*?"<>|]/g, '')
       .replace(/\s{2,}/g, ' ')
       .trim();
+  }
+
+  function defaultExportBaseName() {
+    const doc = window.documentDetails || {};
+    return todayYYMMDD() + '_' + sanitize(doc.project_id || 'drawings');
+  }
+
+  function getExportBaseName() {
+    const base = sanitize(exportBaseName)
+      .replace(/\.(zip|csv|json)$/i, '')
+      .trim();
+    return base || defaultExportBaseName();
+  }
+
+  function resetExportBaseName() {
+    exportBaseName = defaultExportBaseName();
+    const input = document.getElementById('sp-export-name');
+    if (input) input.value = exportBaseName;
   }
 
   function generateFilename(sheet, template, seqIndex) {
@@ -102,6 +121,8 @@
   function buildStagingData() {
     const fn         = window.getCanonicalExportData;
     const exportData = fn ? fn() : { sheets: [] };
+
+    resetExportBaseName();
 
     stagingData = exportData.sheets.map((sheet, i) => ({
       page:              sheet.page,
@@ -397,8 +418,7 @@
         compressionOptions: { level: 1 }, // PDFs are already compressed
       });
 
-      const doc  = window.documentDetails || {};
-      const name = todayYYMMDD() + '_' + sanitize(doc.project_id || 'drawings') + '.zip';
+      const name = getExportBaseName() + '.zip';
 
       if (dlB) { dlB(blob, name); } else {
         const url = URL.createObjectURL(blob);
@@ -434,8 +454,7 @@
       ),
     ].join('\n');
 
-    const doc  = window.documentDetails || {};
-    const name = todayYYMMDD() + '_' + sanitize(doc.project_id || 'drawings') + '.csv';
+    const name = getExportBaseName() + '.csv';
     if (window.downloadBlob) window.downloadBlob(new Blob([csv], { type: 'text/csv' }), name);
   }
 
@@ -465,7 +484,7 @@
       })),
     };
 
-    const name = todayYYMMDD() + '_' + sanitize(doc.project_id || 'drawings') + '.json';
+    const name = getExportBaseName() + '.json';
     if (window.downloadBlob) window.downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), name);
   }
 
@@ -513,6 +532,14 @@
     if (customInput) {
       customInput.value = filenameTemplate;
       customInput.addEventListener('input', () => onCustomInput(customInput.value));
+    }
+
+    const exportNameInput = document.getElementById('sp-export-name');
+    if (exportNameInput) {
+      resetExportBaseName();
+      exportNameInput.addEventListener('input', () => {
+        exportBaseName = exportNameInput.value;
+      });
     }
 
     // Sequence prefix toggle
