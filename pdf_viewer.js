@@ -61,6 +61,8 @@ let dragHasMoved = false;
 let dragClickShouldToggleOff = false;
 let dragStartById = new Map();
 let currentRenderTask = null;
+let renderedScale = scale;   // scale at which the visible canvas was last drawn
+let zoomDebounceTimer = null;
 const thumbnailDataCache = new Map();
 
 // ghostExclusions variable
@@ -473,7 +475,6 @@ async function renderPage(pageNum) {
   if (!pdfDoc) return;
 
   if (currentRenderTask) {
-    console.log('🛑 Cancelling previous render');
     currentRenderTask.cancel();
     currentRenderTask = null;
   }
@@ -482,79 +483,78 @@ async function renderPage(pageNum) {
   selectedRegionIds = [];
   selectedRegionId = null;
 
-  ctx.clearRect(0, 0, canvas.width || 800, canvas.height || 600);
-  ctx.fillStyle = '#f0f0f0';
-  ctx.fillRect(0, 0, canvas.width || 800, canvas.height || 600);
-  ctx.fillStyle = '#666';
-  ctx.font = '16px sans-serif';
-  ctx.fillText('Loading...', 20, 40);
-
   let page;
   try {
     page = await pdfDoc.getPage(pageNum);
   } catch (err) {
     console.error(`Error loading page ${pageNum}:`, err);
-    ctx.fillStyle = '#f44336';
-    ctx.fillText(`Error loading page ${pageNum}`, 20, 40);
     return;
   }
-  
-  // const MAX_CANVAS_DIMENSION = 3072;
-  // const MAX_CANVAS_DIMENSION = 5120;
-  // const MAX_CANVAS_DIMENSION = 8192;
+
   const MAX_CANVAS_DIMENSION = 16384;
   let effectiveScale = scale;
-  
+
   const baseViewport = page.getViewport({ scale: 1.0 });
-  const targetWidth = baseViewport.width * scale;
+  const targetWidth  = baseViewport.width  * scale;
   const targetHeight = baseViewport.height * scale;
-  
+
   if (targetWidth > MAX_CANVAS_DIMENSION || targetHeight > MAX_CANVAS_DIMENSION) {
     const scaleX = MAX_CANVAS_DIMENSION / baseViewport.width;
     const scaleY = MAX_CANVAS_DIMENSION / baseViewport.height;
     effectiveScale = Math.min(scaleX, scaleY, scale);
     console.warn(`⚠️ Large page detected. Limiting scale to ${effectiveScale.toFixed(2)} (requested: ${scale.toFixed(2)})`);
   }
-  
+
   const viewport = page.getViewport({ scale: effectiveScale });
-  canvas.width = viewport.width;
-  canvas.height = viewport.height;
-  overlay.setAttribute("width", viewport.width);
-  overlay.setAttribute("height", viewport.height);
+
+  // Render into a hidden offscreen canvas so the visible canvas
+  // never shows a blank/loading state — swap happens atomically.
+  const offscreen = document.createElement('canvas');
+  offscreen.width  = viewport.width;
+  offscreen.height = viewport.height;
 
   try {
-    currentRenderTask = page.render({ 
-      canvasContext: ctx, 
+    currentRenderTask = page.render({
+      canvasContext: offscreen.getContext('2d'),
       viewport,
       intent: 'display',
       renderInteractiveForms: false,
       enableWebGL: false,
     });
-    
     await currentRenderTask.promise;
     currentRenderTask = null;
   } catch (err) {
-    if (err.name === 'RenderingCancelledException') {
-      console.log('⏭️ Render cancelled');
-      return;
+    offscreen.width = 0;
+    offscreen.height = 0;
+    if (err.name !== 'RenderingCancelledException') {
+      console.error(`❌ Error rendering page ${pageNum}:`, err);
     }
-    console.error(`❌ Error rendering page ${pageNum}:`, err);
-    ctx.fillStyle = '#f44336';
-    ctx.font = '20px sans-serif';
-    ctx.fillText(`Error rendering page ${pageNum}`, 20, 40);
-    ctx.fillText('Try reducing zoom or reloading', 20, 70);
+    if (page?.cleanup) page.cleanup();
+    return;
   }
 
+  // Atomic swap: reset any CSS scaling, resize canvas, blit in one frame.
+  canvas.style.width  = '';
+  canvas.style.height = '';
+  canvas.width  = viewport.width;
+  canvas.height = viewport.height;
+  ctx.drawImage(offscreen, 0, 0);
+  offscreen.width = 0;
+  offscreen.height = 0;
+
+  overlay.setAttribute('width',  viewport.width);
+  overlay.setAttribute('height', viewport.height);
+
+  renderedScale = scale;
+
   if (pageIndicator) {
-  pageIndicator.textContent = `Page ${currentPage} / ${pdfDoc.numPages} (${(scale * 100).toFixed(0)}%)`;
+    pageIndicator.textContent = `Page ${currentPage} / ${pdfDoc.numPages} (${(scale * 100).toFixed(0)}%)`;
   }
 
   highlightActiveThumb();
   redrawRegions();
-  
-  if (page && page.cleanup) {
-    page.cleanup();
-  }
+
+  if (page?.cleanup) page.cleanup();
   page = null;
 }
 
@@ -593,13 +593,7 @@ async function buildThumbnails() {
     placeholder.style.cssText = `
   background: #555;
   color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   font-size: 11px;
-  cursor: pointer;
-  border: 2px solid transparent;
-  box-sizing: border-box;
 `;
     placeholder.textContent = `Page ${i}`;
     placeholder.dataset.pageNum = i;
@@ -1792,7 +1786,6 @@ window.addEventListener("keydown", (e) => {
 
 pdfScroll?.addEventListener("wheel", (e) => {
   e.preventDefault();
-
   if (e.shiftKey) return;
 
   const PAN_SPEED = 3;
@@ -1802,28 +1795,41 @@ pdfScroll?.addEventListener("wheel", (e) => {
     pdfScroll.scrollLeft += e.deltaY * PAN_SPEED;
     return;
   }
-
   if (e.altKey) {
     pdfScroll.scrollTop += e.deltaY * PAN_SPEED;
     return;
   }
 
+  if (!pdfDoc) return;
+
   const rect = pdfScroll.getBoundingClientRect();
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
 
+  // Anchor point in page-space (invariant across zoom)
   const px = (pdfScroll.scrollLeft + mx) / scale;
-  const py = (pdfScroll.scrollTop + my) / scale;
+  const py = (pdfScroll.scrollTop  + my) / scale;
 
   scale *= e.deltaY < 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR;
-  scale = Math.min(Math.max(scale, 0.3), 20.0); // Increased from 5 to 20
+  scale = Math.min(Math.max(scale, 0.3), 20.0);
 
-  renderPage(currentPage);
+  // Immediately CSS-scale the canvas — updates scroll area with no re-render.
+  // renderedScale is stable for the duration of the gesture.
+  const cssRatio = scale / renderedScale;
+  canvas.style.width  = Math.round(canvas.width  * cssRatio) + 'px';
+  canvas.style.height = Math.round(canvas.height * cssRatio) + 'px';
 
-  requestAnimationFrame(() => {
-    pdfScroll.scrollLeft = px * scale - mx;
-    pdfScroll.scrollTop = py * scale - my;
-  });
+  // Correct scroll so the point under the pointer stays fixed.
+  pdfScroll.scrollLeft = px * scale - mx;
+  pdfScroll.scrollTop  = py * scale - my;
+
+  if (pageIndicator) {
+    pageIndicator.textContent = `Page ${currentPage} / ${pdfDoc.numPages} (${(scale * 100).toFixed(0)}%)`;
+  }
+
+  // Re-render at full quality once the gesture settles.
+  clearTimeout(zoomDebounceTimer);
+  zoomDebounceTimer = setTimeout(() => renderPage(currentPage), 150);
 }, { passive: false });
 
 function getCanonicalExportData() {
@@ -2014,3 +2020,42 @@ Object.defineProperty(window, 'multiPdfDocs',       { get: () => multiPdfDocs,  
 Object.defineProperty(window, 'documentDetails',    { get: () => documentDetails,    configurable: true });
 Object.defineProperty(window, 'sheetDetailsByPage', { get: () => sheetDetailsByPage, configurable: true });
 Object.defineProperty(window, 'regionTemplates',    { get: () => regionTemplates,    configurable: true });
+
+// ── Sidebar resize handle ────────────────────────────────────────────────────
+(function initSidebarResizer() {
+  const resizer = document.getElementById('sidebar-resizer');
+  const sidebarEl = document.getElementById('sidebar');
+  if (!resizer || !sidebarEl) return;
+
+  const MIN_WIDTH = 80;
+  const MAX_WIDTH = 340;
+
+  let isResizing = false;
+  let startX = 0;
+  let startWidth = 0;
+
+  resizer.addEventListener('mousedown', (e) => {
+    isResizing = true;
+    startX = e.clientX;
+    startWidth = sidebarEl.offsetWidth;
+    resizer.classList.add('is-resizing');
+    document.body.style.cursor = 'ew-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!isResizing) return;
+    const newWidth = Math.min(Math.max(startWidth + (e.clientX - startX), MIN_WIDTH), MAX_WIDTH);
+    sidebarEl.style.width = newWidth + 'px';
+    sidebarEl.style.flex = `0 0 ${newWidth}px`;
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (!isResizing) return;
+    isResizing = false;
+    resizer.classList.remove('is-resizing');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  });
+})();
