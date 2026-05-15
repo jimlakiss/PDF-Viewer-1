@@ -137,9 +137,9 @@
       flex: 1 1 auto;
       overflow: auto;
       background: #111;
-      position: relative;
     }
-    #canvas-wrap { position: relative; display: inline-block; }
+    #canvas-outer { display: inline-block; vertical-align: top; }
+    #canvas-wrap  { position: relative; display: inline-block; }
     #pdf-canvas  { display: block; }
     #overlay {
       position: absolute; top: 0; left: 0;
@@ -391,9 +391,11 @@
 
     <!-- PDF canvas + SVG overlay -->
     <div id="pdf-scroll">
-      <div id="canvas-wrap">
-        <canvas id="pdf-canvas"></canvas>
-        <svg id="overlay"></svg>
+      <div id="canvas-outer">
+        <div id="canvas-wrap">
+          <canvas id="pdf-canvas"></canvas>
+          <svg id="overlay"></svg>
+        </div>
       </div>
     </div>
 

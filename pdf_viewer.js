@@ -13,8 +13,9 @@ const sidebar = document.getElementById("sidebar");
 const pageIndicator = document.getElementById("page-indicator");
 const zoomInBtn = document.getElementById("zoom-in");
 const zoomOutBtn = document.getElementById("zoom-out");
-const pdfScroll = document.getElementById("pdf-scroll");
-const overlay = document.getElementById("overlay");
+const pdfScroll   = document.getElementById("pdf-scroll");
+const canvasOuter = document.getElementById("canvas-outer");
+const overlay     = document.getElementById("overlay");
 const regionTypeSelect = document.getElementById("region-type");
 const drawTypeSwatch = document.getElementById("draw-type-swatch");
 const preparedByInput = document.getElementById("prepared-by");
@@ -61,8 +62,13 @@ let dragHasMoved = false;
 let dragClickShouldToggleOff = false;
 let dragStartById = new Map();
 let currentRenderTask = null;
+const MAX_CANVAS_DIMENSION = 16384;
 let renderedScale = scale;   // scale at which the visible canvas was last drawn
 let zoomDebounceTimer = null;
+let gestureAnchor = null;    // page-space point locked under the pointer for this gesture
+let canvasPadX = 0;          // canvas-outer left/right padding (px) — set by scrollToCenter
+let canvasPadY = 0;          // canvas-outer top/bottom padding (px)
+let recenterAfterRender = false;
 const thumbnailDataCache = new Map();
 
 // ghostExclusions variable
@@ -329,6 +335,7 @@ async function handleSelectedPDFs(selectedFiles, source = "picker") {
       console.log(`🖼️ Starting thumbnail build for ${pageCount} pages...`);
       await buildThumbnails();
       console.log('📄 Rendering first page...');
+      recenterAfterRender = true;
       await renderPage(1);
       console.log('✅ PDF ready');
     } catch (err) {
@@ -459,6 +466,7 @@ async function loadMultiplePDFs(files) {
   console.log(`🖼️ Building thumbnails for ${totalPages} combined pages...`);
   await buildThumbnails();
   console.log('📄 Rendering first page...');
+  recenterAfterRender = true;
   await renderPage(1);
   console.log('✅ Combined PDF ready');
 }
@@ -491,7 +499,6 @@ async function renderPage(pageNum) {
     return;
   }
 
-  const MAX_CANVAS_DIMENSION = 16384;
   let effectiveScale = scale;
 
   const baseViewport = page.getViewport({ scale: 1.0 });
@@ -502,7 +509,9 @@ async function renderPage(pageNum) {
     const scaleX = MAX_CANVAS_DIMENSION / baseViewport.width;
     const scaleY = MAX_CANVAS_DIMENSION / baseViewport.height;
     effectiveScale = Math.min(scaleX, scaleY, scale);
-    console.warn(`⚠️ Large page detected. Limiting scale to ${effectiveScale.toFixed(2)} (requested: ${scale.toFixed(2)})`);
+    // Cap scale so renderedScale stays in sync — mismatch breaks the CSS
+    // zoom ratio and causes scroll jumps near the canvas size limit.
+    scale = effectiveScale;
   }
 
   const viewport = page.getViewport({ scale: effectiveScale });
@@ -533,11 +542,19 @@ async function renderPage(pageNum) {
     return;
   }
 
-  // Atomic swap: reset any CSS scaling, resize canvas, blit in one frame.
-  canvas.style.width  = '';
-  canvas.style.height = '';
+  // Atomic swap — order matters to prevent scroll-area contraction:
+  // Set canvas.width FIRST while the CSS override is still active (layout
+  // unchanged), THEN remove the override so layout transitions directly from
+  // CSS-scaled size → new pixel size (≈ same value, no contraction).
+  // Save/restore scroll so any sub-pixel rounding difference can't clamp it.
+  const savedScrollLeft = pdfScroll.scrollLeft;
+  const savedScrollTop  = pdfScroll.scrollTop;
   canvas.width  = viewport.width;
   canvas.height = viewport.height;
+  canvas.style.width  = '';
+  canvas.style.height = '';
+  pdfScroll.scrollLeft = savedScrollLeft;
+  pdfScroll.scrollTop  = savedScrollTop;
   ctx.drawImage(offscreen, 0, 0);
   offscreen.width = 0;
   offscreen.height = 0;
@@ -546,6 +563,11 @@ async function renderPage(pageNum) {
   overlay.setAttribute('height', viewport.height);
 
   renderedScale = scale;
+
+  if (recenterAfterRender) {
+    recenterAfterRender = false;
+    scrollToCenter();
+  }
 
   if (pageIndicator) {
     pageIndicator.textContent = `Page ${currentPage} / ${pdfDoc.numPages} (${(scale * 100).toFixed(0)}%)`;
@@ -556,6 +578,22 @@ async function renderPage(pageNum) {
 
   if (page?.cleanup) page.cleanup();
   page = null;
+}
+
+// Sets padding on canvas-outer so there is scroll room in every direction,
+// then scrolls to put the canvas in the centre of the viewport.
+function scrollToCenter() {
+  // One full viewport-width of padding on each side gives the scroll
+  // container enough range to zoom toward any pointer location.
+  canvasPadX = pdfScroll.clientWidth;
+  canvasPadY = pdfScroll.clientHeight;
+  canvasOuter.style.padding = `${canvasPadY}px ${canvasPadX}px`;
+
+  // Force layout so scrollWidth/Height reflect the new padding.
+  void pdfScroll.scrollWidth;
+
+  pdfScroll.scrollLeft = Math.max(0, canvasPadX + Math.round((canvas.width  - pdfScroll.clientWidth)  / 2));
+  pdfScroll.scrollTop  = Math.max(0, canvasPadY + Math.round((canvas.height - pdfScroll.clientHeight) / 2));
 }
 
 zoomInBtn?.addEventListener("click", () => {
@@ -599,6 +637,7 @@ async function buildThumbnails() {
     placeholder.dataset.pageNum = i;
     placeholder.addEventListener("click", () => {
       console.log(`👆 Clicked thumbnail ${i}`);
+      recenterAfterRender = true;
       renderPage(i);
     });
     sidebar.appendChild(placeholder);
@@ -1806,30 +1845,57 @@ pdfScroll?.addEventListener("wheel", (e) => {
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
 
-  // Anchor point in page-space (invariant across zoom)
-  const px = (pdfScroll.scrollLeft + mx) / scale;
-  const py = (pdfScroll.scrollTop  + my) / scale;
+  // Lock the page-space anchor once at gesture start.
+  // canvasPadX/Y is the fixed offset of the canvas inside canvas-outer,
+  // so subtracting it gives coordinates relative to the canvas itself.
+  if (!gestureAnchor) {
+    gestureAnchor = {
+      pageX: (pdfScroll.scrollLeft + mx - canvasPadX) / scale,
+      pageY: (pdfScroll.scrollTop  + my - canvasPadY) / scale,
+      mx, my,
+    };
+  }
 
   scale *= e.deltaY < 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR;
   scale = Math.min(Math.max(scale, 0.3), 20.0);
 
-  // Immediately CSS-scale the canvas — updates scroll area with no re-render.
-  // renderedScale is stable for the duration of the gesture.
+  // Cap scale to what the browser can actually render. Without this the CSS
+  // scale races far ahead of the renderable limit; when the debounce fires the
+  // canvas is much smaller than expected and scrollLeft gets clamped hard.
+  if (canvas.width > 0 && renderedScale > 0) {
+    const baseW = canvas.width  / renderedScale;
+    const baseH = canvas.height / renderedScale;
+    scale = Math.min(scale, MAX_CANVAS_DIMENSION / baseW, MAX_CANVAS_DIMENSION / baseH);
+  }
+
   const cssRatio = scale / renderedScale;
   canvas.style.width  = Math.round(canvas.width  * cssRatio) + 'px';
   canvas.style.height = Math.round(canvas.height * cssRatio) + 'px';
 
-  // Correct scroll so the point under the pointer stays fixed.
-  pdfScroll.scrollLeft = px * scale - mx;
-  pdfScroll.scrollTop  = py * scale - my;
+  // Apply scroll so the locked anchor stays under the pointer.
+  // No forced reflow here — gestureAnchor keeps the formula stable even if
+  // one event's scrollLeft is briefly clamped before the layout catches up.
+  pdfScroll.scrollLeft = gestureAnchor.pageX * scale + canvasPadX - gestureAnchor.mx;
+  pdfScroll.scrollTop  = gestureAnchor.pageY * scale + canvasPadY - gestureAnchor.my;
 
   if (pageIndicator) {
     pageIndicator.textContent = `Page ${currentPage} / ${pdfDoc.numPages} (${(scale * 100).toFixed(0)}%)`;
   }
 
   // Re-render at full quality once the gesture settles.
+  // Save the anchor so we can re-apply scroll after the render corrects scale.
   clearTimeout(zoomDebounceTimer);
-  zoomDebounceTimer = setTimeout(() => renderPage(currentPage), 150);
+  zoomDebounceTimer = setTimeout(async () => {
+    const anchor = gestureAnchor;
+    gestureAnchor = null;
+    await renderPage(currentPage);
+    // renderPage may cap scale further (MAX_CANVAS_DIMENSION); re-apply scroll
+    // now that the canvas is at its true rendered size so nothing is clamped.
+    if (anchor) {
+      pdfScroll.scrollLeft = anchor.pageX * scale + canvasPadX - anchor.mx;
+      pdfScroll.scrollTop  = anchor.pageY * scale + canvasPadY - anchor.my;
+    }
+  }, 150);
 }, { passive: false });
 
 function getCanonicalExportData() {
