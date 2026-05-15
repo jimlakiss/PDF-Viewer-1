@@ -27,9 +27,24 @@ const drawTypeSwatch = document.getElementById("draw-type-swatch");
 const preparedByInput = document.getElementById("prepared-by");
 const projectIdInput = document.getElementById("project-id");
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
-if (pdfjsLib.GlobalWorkerOptions) {
-  pdfjsLib.GlobalWorkerOptions.enableXfa = false;
+function getPdfjsLib() {
+  return (typeof pdfjsLib !== "undefined") ? pdfjsLib : null;
+}
+
+function requirePdfjsLib() {
+  const lib = getPdfjsLib();
+  if (!lib) {
+    throw new Error("PDF.js failed to load. Refresh the page, or check that cdnjs.cloudflare.com is reachable.");
+  }
+  return lib;
+}
+
+const initialPdfjsLib = getPdfjsLib();
+if (initialPdfjsLib?.GlobalWorkerOptions) {
+  initialPdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  initialPdfjsLib.GlobalWorkerOptions.enableXfa = false;
+} else {
+  console.warn("PDF.js is not available yet; PDF upload will be disabled until the library loads.");
 }
 
 let TEMPLATE_MASTER_PAGE = null;
@@ -351,7 +366,7 @@ async function handleSelectedPDFs(selectedFiles, source = "picker") {
       pdfRawBytes = data.slice(); // copy before PDF.js transfers the ArrayBuffer to its worker
       console.log('📂 Loading PDF document...');
 
-      const loadingTask = pdfjsLib.getDocument({
+      const loadingTask = requirePdfjsLib().getDocument({
         data: data,
         cMapUrl: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/cmaps/',
         cMapPacked: true,
@@ -471,7 +486,7 @@ async function loadMultiplePDFs(files) {
       const uint8Data = new Uint8Array(data);
       const uint8Copy = uint8Data.slice(); // copy before PDF.js transfers the ArrayBuffer to its worker
 
-      const loadingTask = pdfjsLib.getDocument({
+      const loadingTask = requirePdfjsLib().getDocument({
         data: uint8Data,
         cMapUrl: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/cmaps/',
         cMapPacked: true,
@@ -1677,7 +1692,7 @@ async function extractVectorTextFromRegion(pageNum, region) {
   const strings = [];
 
   textContent.items.forEach((item) => {
-    const [, , , , tx, ty] = pdfjsLib.Util.transform(viewport.transform, item.transform);
+    const [, , , , tx, ty] = requirePdfjsLib().Util.transform(viewport.transform, item.transform);
     if (tx >= xMin && tx <= xMax && ty >= yMin && ty <= yMax) {
       strings.push(item.str);
     }
@@ -3404,7 +3419,7 @@ document.getElementById('tool-snap-debug')?.addEventListener('click', function (
 // ── Vector snap ──────────────────────────────────────────────────────────────
 
 // pdf.js OPS constants (fallback if pdfjsLib.OPS not accessible at runtime)
-const _PDF_OPS = pdfjsLib.OPS || {
+const _PDF_OPS = getPdfjsLib()?.OPS || {
   save: 3, restore: 4, transform: 12,
   moveTo: 13, lineTo: 14,
   curveTo: 15, curveTo1: 16, curveTo2: 16, curveTo3: 17,
