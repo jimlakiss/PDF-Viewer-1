@@ -90,6 +90,87 @@
     .btn-split { background: #1a6b3c; color: #fff; border-color: #22854c; font-weight: 600; }
     .btn-split:hover { background: #22854c; }
 
+    /* ── Measure toolbar ────────────────────────────────────── */
+    #measure-toolbar {
+      flex: 0 0 auto;
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 5px 14px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      z-index: 9;
+    }
+    .btn-tool.is-active { background: var(--accent); color: #fff; border-color: var(--accent-dk); }
+
+    /* ── Scale zone dialog ──────────────────────────────────── */
+    #sz-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.42);
+      z-index: 9100;
+    }
+    #sz-dialog {
+      position: fixed; top: 50%; left: 50%;
+      transform: translate(-50%,-50%);
+      background: var(--surface); border: 1px solid var(--border-md);
+      border-radius: var(--radius); padding: 18px 22px;
+      z-index: 9101; min-width: 300px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.7);
+    }
+    #sz-dialog h3 { margin: 0 0 14px; font-size: 14px; font-weight: 600; }
+    .sz-tabs { display: flex; gap: 4px; margin-bottom: 14px; }
+    .sz-tab {
+      font-size: 11px; padding: 4px 10px; cursor: pointer;
+      border-radius: 3px; border: 1px solid var(--border-md);
+      background: none; color: var(--text-dim); transition: background 0.12s;
+    }
+    .sz-tab.is-active { background: var(--accent); color: #fff; border-color: var(--accent-dk); }
+    .sz-panel { display: none; }
+    .sz-panel.is-active { display: block; }
+    .sz-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 12px; }
+    .sz-row label { color: var(--text-dim); white-space: nowrap; }
+    .sz-row select, .sz-row input[type="number"] {
+      background: var(--panel); border: 1px solid var(--border-md);
+      color: var(--text); border-radius: 3px; padding: 3px 6px; font-size: 12px; height: 26px;
+    }
+    .sz-hint { font-size: 11px; color: var(--text-dim); line-height: 1.5; margin-bottom: 10px; }
+    .sz-status { font-size: 12px; color: var(--accent); font-weight: 600; margin-bottom: 8px; min-height: 18px; }
+    .sz-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+    /* ── Measurement SVG styles ─────────────────────────────── */
+    .msr-zone-poly {
+      fill: rgba(77,163,255,0.07); stroke: #4da3ff;
+      stroke-width: 1.5; stroke-dasharray: 7 4;
+      cursor: pointer;
+    }
+    .msr-zone-poly.msr-sel { fill: rgba(77,163,255,0.18); stroke-width: 2.5; }
+    .msr-zone-lbl { font-size: 11px; fill: #4da3ff; font-family: sans-serif; pointer-events: none; }
+    .msr-line { stroke: #f0a040; stroke-width: 2; fill: none; }
+    .msr-tick { stroke: #f0a040; stroke-width: 2; }
+    .msr-linear-g { cursor: pointer; }
+    .msr-linear-g.msr-sel .msr-line,
+    .msr-linear-g.msr-sel .msr-tick { stroke: #ffd080; stroke-width: 3; }
+    .msr-area-poly {
+      fill: rgba(240,160,64,0.12); stroke: #f0a040; stroke-width: 2; cursor: pointer;
+    }
+    .msr-area-poly.msr-sel { fill: rgba(240,160,64,0.28); stroke: #ffd080; stroke-width: 3; }
+    .msr-lbl {
+      font-size: 12px; fill: #f0a040; font-family: sans-serif; font-weight: 700;
+      paint-order: stroke fill;
+      stroke: rgba(0,0,0,0.85); stroke-width: 3px;
+      pointer-events: none;
+    }
+    .msr-lbl.msr-sel { fill: #ffd080; }
+    .msr-count-dot { fill: #e74c3c; stroke: #fff; stroke-width: 1.5; cursor: pointer; }
+    .msr-count-dot.msr-sel { fill: #ff8888; }
+    .msr-count-num {
+      font-size: 9px; fill: #fff; text-anchor: middle; dominant-baseline: central;
+      pointer-events: none; font-weight: 700; font-family: sans-serif;
+    }
+    .msr-preview {
+      stroke: rgba(240,160,64,0.45); stroke-width: 1.5;
+      stroke-dasharray: 5 4; fill: none; pointer-events: none;
+    }
+    .msr-snap-ring { fill: none; stroke: #f0a040; stroke-width: 1.5; stroke-dasharray: 3 3; pointer-events: none; }
+
 
     /* Draw type swatch */
     #draw-type-swatch[data-swatch="sheet_id"]          { color: #4da3ff; }
@@ -393,6 +474,22 @@
     <button id="fit-width" class="btn btn-default" style="padding:0 8px;font-size:11px" title="Fit to window width">Fit Width</button>
   </div>
 
+  <!-- ── MEASURE TOOLBAR ──────────────────────────────────────── -->
+  <div id="measure-toolbar">
+    <span class="toolbar-label">Tool:</span>
+    <button id="tool-select"     class="btn btn-default btn-tool is-active" title="Select / pan">Select</button>
+    <div class="toolbar-sep"></div>
+    <span class="toolbar-label">Measure:</span>
+    <button id="tool-scale-zone" class="btn btn-default btn-tool" title="Draw a scale zone polygon">⊞ Scale Zone</button>
+    <button id="tool-linear"     class="btn btn-default btn-tool" title="Linear distance — click 2 points">↔ Linear</button>
+    <button id="tool-area"       class="btn btn-default btn-tool" title="Measure area — click polygon, click first point to close">⬡ Area</button>
+    <button id="tool-count"      class="btn btn-default btn-tool" title="Count items — click to place numbered markers">⊕ Count</button>
+    <div class="toolbar-sep"></div>
+    <span id="active-scale-lbl" style="font-size:11px;color:var(--text-dim)">No scale set</span>
+    <div style="flex:1"></div>
+    <button id="clear-measurements" class="btn btn-default" style="font-size:11px">Clear Measurements</button>
+  </div>
+
   <!-- ── MAIN BODY ──────────────────────────────────────────── -->
   <div id="main-body">
 
@@ -414,6 +511,58 @@
 
 </div><!-- /#app -->
 
+<!-- ── SCALE ZONE DIALOG ─────────────────────────────────────── -->
+<div id="sz-backdrop" hidden></div>
+<div id="sz-dialog" hidden>
+  <h3>Set Scale Zone</h3>
+  <div class="sz-tabs">
+    <button class="sz-tab is-active" id="sz-tab-ratio">Scale Ratio</button>
+    <button class="sz-tab"           id="sz-tab-ref">Reference Line</button>
+  </div>
+
+  <!-- Ratio panel -->
+  <div id="sz-panel-ratio" class="sz-panel is-active">
+    <div class="sz-row">
+      <label>Drawing scale:</label>
+      <span style="font-size:13px;font-weight:600">1 :</span>
+      <select id="sz-ratio-sel" style="width:100px">
+        <option value="1">1</option>
+        <option value="2">2</option>
+        <option value="5">5</option>
+        <option value="10">10</option>
+        <option value="20">20</option>
+        <option value="25">25</option>
+        <option value="50">50</option>
+        <option value="100" selected>100</option>
+        <option value="200">200</option>
+        <option value="250">250</option>
+        <option value="500">500</option>
+        <option value="1000">1 000</option>
+        <option value="1250">1 250</option>
+        <option value="2500">2 500</option>
+        <option value="custom">Custom…</option>
+      </select>
+      <input id="sz-ratio-custom" type="number" placeholder="e.g. 75"
+             step="any" min="0.01" style="width:70px;display:none">
+    </div>
+  </div>
+
+  <!-- Reference line panel -->
+  <div id="sz-panel-ref" class="sz-panel">
+    <p class="sz-hint">Click two points on the PDF over a dimension of known length, then enter the real-world distance.</p>
+    <div id="sz-ref-status" class="sz-status">Click first point on the PDF…</div>
+    <div id="sz-ref-len-row" class="sz-row" style="display:none">
+      <label>Real-world length:</label>
+      <input id="sz-ref-len" type="number" placeholder="0.000" step="0.001" min="0.001" style="width:90px">
+      <span style="font-size:12px">m</span>
+    </div>
+  </div>
+
+  <div class="sz-foot">
+    <button id="sz-cancel" class="btn btn-default">Cancel</button>
+    <button id="sz-ok"     class="btn btn-primary">OK</button>
+  </div>
+</div>
 
 <!-- ── STAGING PANEL (overlay) ──────────────────────────────── -->
 <div id="staging-panel">
