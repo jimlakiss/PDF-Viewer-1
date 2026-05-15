@@ -90,7 +90,6 @@
     .btn-split { background: #1a6b3c; color: #fff; border-color: #22854c; font-weight: 600; }
     .btn-split:hover { background: #22854c; }
 
-    #page-indicator { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
 
     /* Draw type swatch */
     #draw-type-swatch[data-swatch="sheet_id"]          { color: #4da3ff; }
@@ -376,10 +375,22 @@
 
     <div class="toolbar-sep"></div>
 
-    <!-- Zoom + page indicator -->
-    <button id="zoom-out" class="btn btn-default" style="width:30px;padding:0;justify-content:center">−</button>
-    <button id="zoom-in"  class="btn btn-default" style="width:30px;padding:0;justify-content:center">+</button>
-    <span id="page-indicator">Page — / —</span>
+    <!-- Page navigation -->
+    <button id="prev-page" class="btn btn-default" style="width:28px;padding:0;justify-content:center" title="Previous page">‹</button>
+    <input type="text" id="page-input" style="width:36px;text-align:center" value="—" title="Page number">
+    <span style="font-size:12px;color:var(--text-dim)">/ <span id="page-total">—</span></span>
+    <button id="next-page" class="btn btn-default" style="width:28px;padding:0;justify-content:center" title="Next page">›</button>
+
+    <div class="toolbar-sep"></div>
+
+    <!-- Zoom controls -->
+    <button id="zoom-out" class="btn btn-default" style="width:28px;padding:0;justify-content:center" title="Zoom out">−</button>
+    <input type="text" id="zoom-input" style="width:54px;text-align:center" value="—" title="Zoom %">
+    <button id="zoom-in"  class="btn btn-default" style="width:28px;padding:0;justify-content:center" title="Zoom in">+</button>
+
+    <div class="toolbar-sep"></div>
+
+    <button id="fit-width" class="btn btn-default" style="padding:0 8px;font-size:11px" title="Fit to window width">Fit Width</button>
   </div>
 
   <!-- ── MAIN BODY ──────────────────────────────────────────── -->

@@ -10,9 +10,14 @@ const uploadDropZone = document.getElementById("upload-drop-zone");
 const canvas = document.getElementById("pdf-canvas");
 const ctx = canvas.getContext("2d");
 const sidebar = document.getElementById("sidebar");
-const pageIndicator = document.getElementById("page-indicator");
-const zoomInBtn = document.getElementById("zoom-in");
-const zoomOutBtn = document.getElementById("zoom-out");
+const prevPageBtn  = document.getElementById("prev-page");
+const nextPageBtn  = document.getElementById("next-page");
+const pageInputEl  = document.getElementById("page-input");
+const pageTotalEl  = document.getElementById("page-total");
+const zoomInputEl  = document.getElementById("zoom-input");
+const zoomInBtn    = document.getElementById("zoom-in");
+const zoomOutBtn   = document.getElementById("zoom-out");
+const fitWidthBtn  = document.getElementById("fit-width");
 const pdfScroll   = document.getElementById("pdf-scroll");
 const canvasOuter = document.getElementById("canvas-outer");
 const overlay     = document.getElementById("overlay");
@@ -70,6 +75,14 @@ let canvasPadX = 0;          // canvas-outer left/right padding (px) — set by 
 let canvasPadY = 0;          // canvas-outer top/bottom padding (px)
 let recenterAfterRender = false;
 const thumbnailDataCache = new Map();
+
+const ZOOM_SNAP = [0.10, 0.20, 0.25, 0.33, 0.50, 0.67, 0.75, 1.00, 1.25, 1.50, 2.00, 2.50, 3.00, 4.00, 5.00];
+
+function updateControls() {
+  if (pageInputEl) pageInputEl.value = pdfDoc ? currentPage : '—';
+  if (pageTotalEl) pageTotalEl.textContent = pdfDoc ? pdfDoc.numPages : '—';
+  if (zoomInputEl) zoomInputEl.value = pdfDoc ? `${Math.round(scale * 100)}%` : '—';
+}
 
 // ghostExclusions variable
 const ghostExclusions = {}; // { pageNum: Set(['sheet_id', ...]) }
@@ -569,9 +582,7 @@ async function renderPage(pageNum) {
     scrollToCenter();
   }
 
-  if (pageIndicator) {
-    pageIndicator.textContent = `Page ${currentPage} / ${pdfDoc.numPages} (${(scale * 100).toFixed(0)}%)`;
-  }
+  updateControls();
 
   highlightActiveThumb();
   redrawRegions();
@@ -597,22 +608,84 @@ function scrollToCenter() {
 }
 
 zoomInBtn?.addEventListener("click", () => {
-  scale *= 1.1;
-  scale = Math.min(scale, 20.0); // Increased from 3.0 to 20.0
-  
-  // Warn user about high memory usage
-  if (scale > 5.0 && scale % 1 < 0.2) { // Only warn occasionally
-    console.warn(`⚠️ High zoom level: ${scale.toFixed(1)}x - May use significant memory`);
-  }
-  
-  renderPage(currentPage);
+  if (!pdfDoc) return;
+  const next = ZOOM_SNAP.find(s => s > scale + 0.001);
+  zoomToCenter(next !== undefined ? next : ZOOM_SNAP[ZOOM_SNAP.length - 1]);
 });
 
 zoomOutBtn?.addEventListener("click", () => {
-  scale /= 1.1;
-  scale = Math.max(scale, 0.3);
+  if (!pdfDoc) return;
+  const prev = [...ZOOM_SNAP].reverse().find(s => s < scale - 0.001);
+  zoomToCenter(prev !== undefined ? prev : ZOOM_SNAP[0]);
+});
+
+async function zoomToCenter(newScale) {
+  if (!pdfDoc) return;
+  const anchorPageX = (pdfScroll.scrollLeft + pdfScroll.clientWidth  / 2 - canvasPadX) / scale;
+  const anchorPageY = (pdfScroll.scrollTop  + pdfScroll.clientHeight / 2 - canvasPadY) / scale;
+  scale = Math.min(Math.max(newScale, 0.01), 20.0);
+  await renderPage(currentPage);
+  pdfScroll.scrollLeft = anchorPageX * scale + canvasPadX - pdfScroll.clientWidth  / 2;
+  pdfScroll.scrollTop  = anchorPageY * scale + canvasPadY - pdfScroll.clientHeight / 2;
+}
+
+fitWidthBtn?.addEventListener("click", async () => {
+  if (!pdfDoc) return;
+  const page = await pdfDoc.getPage(currentPage);
+  const baseViewport = page.getViewport({ scale: 1.0 });
+  page.cleanup();
+  scale = pdfScroll.clientWidth / baseViewport.width;
+  scale = Math.min(Math.max(scale, 0.01), 20.0);
+  recenterAfterRender = true;
   renderPage(currentPage);
 });
+
+prevPageBtn?.addEventListener("click", () => {
+  if (!pdfDoc || currentPage <= 1) return;
+  recenterAfterRender = true;
+  renderPage(currentPage - 1);
+});
+
+nextPageBtn?.addEventListener("click", () => {
+  if (!pdfDoc || currentPage >= pdfDoc.numPages) return;
+  recenterAfterRender = true;
+  renderPage(currentPage + 1);
+});
+
+function commitPageInput() {
+  if (!pdfDoc) return;
+  const n = parseInt(pageInputEl.value, 10);
+  if (!Number.isFinite(n) || n < 1 || n > pdfDoc.numPages) {
+    updateControls();
+    return;
+  }
+  if (n === currentPage) return;
+  recenterAfterRender = true;
+  renderPage(n);
+}
+
+pageInputEl?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); pageInputEl.blur(); commitPageInput(); }
+  if (e.key === "Escape") { updateControls(); pageInputEl.blur(); }
+});
+pageInputEl?.addEventListener("blur", commitPageInput);
+
+function commitZoomInput() {
+  if (!pdfDoc) return;
+  const raw = (zoomInputEl.value || "").replace(/%/g, "").trim();
+  const pct = parseFloat(raw);
+  if (!Number.isFinite(pct) || pct < 1 || pct > 2000) {
+    updateControls();
+    return;
+  }
+  zoomToCenter(pct / 100);
+}
+
+zoomInputEl?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); zoomInputEl.blur(); commitZoomInput(); }
+  if (e.key === "Escape") { updateControls(); zoomInputEl.blur(); }
+});
+zoomInputEl?.addEventListener("blur", commitZoomInput);
 
 async function buildThumbnails() {
   if (!pdfDoc || !sidebar) {
@@ -1878,9 +1951,7 @@ pdfScroll?.addEventListener("wheel", (e) => {
   pdfScroll.scrollLeft = gestureAnchor.pageX * scale + canvasPadX - gestureAnchor.mx;
   pdfScroll.scrollTop  = gestureAnchor.pageY * scale + canvasPadY - gestureAnchor.my;
 
-  if (pageIndicator) {
-    pageIndicator.textContent = `Page ${currentPage} / ${pdfDoc.numPages} (${(scale * 100).toFixed(0)}%)`;
-  }
+  updateControls();
 
   // Re-render at full quality once the gesture settles.
   // Save the anchor so we can re-apply scroll after the render corrects scale.
