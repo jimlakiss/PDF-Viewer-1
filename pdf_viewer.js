@@ -136,15 +136,48 @@ const undoStack = [];
 const redoStack = [];
 const MAX_UNDO_STACK = 50;
 
-function saveUndoState() {
-  // Save current state
-  const state = {
+function buildUndoState() {
+  return {
     regionsByPage: JSON.parse(JSON.stringify(regionsByPage)),
     sheetDetailsByPage: JSON.parse(JSON.stringify(sheetDetailsByPage)),
     regionTemplates: JSON.parse(JSON.stringify(regionTemplates)),
+    measurementsByPage: JSON.parse(JSON.stringify(measurementsByPage)),
+    scaleZonesByPage: JSON.parse(JSON.stringify(scaleZonesByPage)),
     selectedRegionIds: [...selectedRegionIds],
-    currentPage: currentPage,
+    msrSelectedId,
+    msrSelectedPtIdx,
+    currentPage,
   };
+}
+
+function restoreUndoState(state) {
+  Object.keys(regionsByPage).forEach(k => delete regionsByPage[k]);
+  Object.assign(regionsByPage, state.regionsByPage || {});
+
+  Object.keys(sheetDetailsByPage).forEach(k => delete sheetDetailsByPage[k]);
+  Object.assign(sheetDetailsByPage, state.sheetDetailsByPage || {});
+
+  Object.keys(regionTemplates).forEach(k => delete regionTemplates[k]);
+  Object.assign(regionTemplates, state.regionTemplates || {});
+
+  Object.keys(measurementsByPage).forEach(k => delete measurementsByPage[k]);
+  Object.assign(measurementsByPage, state.measurementsByPage || {});
+
+  Object.keys(scaleZonesByPage).forEach(k => delete scaleZonesByPage[k]);
+  Object.assign(scaleZonesByPage, state.scaleZonesByPage || {});
+
+  selectedRegionIds.length = 0;
+  selectedRegionIds.push(...(state.selectedRegionIds || []));
+  syncLegacySelectedId();
+
+  msrSelectedId = state.msrSelectedId ?? null;
+  msrSelectedPtIdx = state.msrSelectedPtIdx ?? -1;
+  currentPage = state.currentPage;
+}
+
+function saveUndoState() {
+  // Save current state
+  const state = buildUndoState();
   
   undoStack.push(state);
   
@@ -166,32 +199,12 @@ function undo() {
   }
   
   // Save current state to redo stack
-  const currentState = {
-    regionsByPage: JSON.parse(JSON.stringify(regionsByPage)),
-    sheetDetailsByPage: JSON.parse(JSON.stringify(sheetDetailsByPage)),
-    regionTemplates: JSON.parse(JSON.stringify(regionTemplates)),
-    selectedRegionIds: [...selectedRegionIds],
-    currentPage: currentPage,
-  };
+  const currentState = buildUndoState();
   redoStack.push(currentState);
   
   // Restore previous state
   const prevState = undoStack.pop();
-  
-  Object.keys(regionsByPage).forEach(k => delete regionsByPage[k]);
-  Object.assign(regionsByPage, prevState.regionsByPage);
-  
-  Object.keys(sheetDetailsByPage).forEach(k => delete sheetDetailsByPage[k]);
-  Object.assign(sheetDetailsByPage, prevState.sheetDetailsByPage);
-  
-  Object.keys(regionTemplates).forEach(k => delete regionTemplates[k]);
-  Object.assign(regionTemplates, prevState.regionTemplates);
-  
-  selectedRegionIds.length = 0;
-  selectedRegionIds.push(...prevState.selectedRegionIds);
-  syncLegacySelectedId();
-  
-  currentPage = prevState.currentPage;
+  restoreUndoState(prevState);
   
   console.log(`↶ Undo applied (undo: ${undoStack.length}, redo: ${redoStack.length})`);
   
@@ -205,32 +218,12 @@ function redo() {
   }
   
   // Save current state to undo stack
-  const currentState = {
-    regionsByPage: JSON.parse(JSON.stringify(regionsByPage)),
-    sheetDetailsByPage: JSON.parse(JSON.stringify(sheetDetailsByPage)),
-    regionTemplates: JSON.parse(JSON.stringify(regionTemplates)),
-    selectedRegionIds: [...selectedRegionIds],
-    currentPage: currentPage,
-  };
+  const currentState = buildUndoState();
   undoStack.push(currentState);
   
   // Restore next state
   const nextState = redoStack.pop();
-  
-  Object.keys(regionsByPage).forEach(k => delete regionsByPage[k]);
-  Object.assign(regionsByPage, nextState.regionsByPage);
-  
-  Object.keys(sheetDetailsByPage).forEach(k => delete sheetDetailsByPage[k]);
-  Object.assign(sheetDetailsByPage, nextState.sheetDetailsByPage);
-  
-  Object.keys(regionTemplates).forEach(k => delete regionTemplates[k]);
-  Object.assign(regionTemplates, nextState.regionTemplates);
-  
-  selectedRegionIds.length = 0;
-  selectedRegionIds.push(...nextState.selectedRegionIds);
-  syncLegacySelectedId();
-  
-  currentPage = nextState.currentPage;
+  restoreUndoState(nextState);
   
   console.log(`↷ Redo applied (undo: ${undoStack.length}, redo: ${redoStack.length})`);
   
@@ -1230,6 +1223,17 @@ function isEditableTarget(el) {
   return tag === "INPUT" || tag === "TEXTAREA" || el.isContentEditable;
 }
 
+function msrUndoActiveDrawPoint() {
+  if (!msrActiveDrawPts.length) return false;
+  msrActiveDrawPts.pop();
+  if (currentTool === 'scale-zone' && msrScaleZoneShape() === 'rectangle') {
+    msrRectDrawStart = null;
+  }
+  msrPreviewPt = null;
+  msrRedrawOnly();
+  return true;
+}
+
 function clamp01(v) {
   if (Number.isNaN(v)) return 0;
   if (v < 0) return 0;
@@ -1907,6 +1911,10 @@ window.addEventListener("keydown", (e) => {
 
   // UNDO: Ctrl/Cmd + Z (without Shift)
   if (modKey && !e.shiftKey && (e.key === "z" || e.key === "Z")) {
+    if (msrUndoActiveDrawPoint()) {
+      e.preventDefault();
+      return;
+    }
     undo();
     e.preventDefault();
     return;
@@ -1963,8 +1971,23 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
+  if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key) && msrSelectedId !== null) {
+    if (!canvas.width || !canvas.height) return;
+    const step = e.shiftKey ? 10 : 1;
+    const dx = e.key === "ArrowLeft" ? -step / canvas.width : e.key === "ArrowRight" ? step / canvas.width : 0;
+    const dy = e.key === "ArrowUp" ? -step / canvas.height : e.key === "ArrowDown" ? step / canvas.height : 0;
+    if (msrNudgeSelected(dx, dy)) {
+      e.preventDefault();
+      return;
+    }
+  }
+
   // DELETE: Delete or Backspace key
   if (e.key === "Delete" || e.key === "Backspace") {
+  if (msrUndoActiveDrawPoint()) {
+    e.preventDefault();
+    return;
+  }
   // Measurement delete takes priority
   if (msrSelectedId !== null) {
     msrDeleteSelected();
@@ -2293,6 +2316,7 @@ const pageBaseDimsCache  = new Map(); // pageNum → { width, height } in PDF pt
 let   msrIdCounter       = 1;
 
 // Drawing state
+let msrSnapEnabled   = true;  // global snap toggle for regions + measurements
 let msrShowSnapDebug = false; // toggle: render all cached snap points as dots
 let msrActiveDrawPts = [];   // normalized points being placed
 let msrPreviewPt     = null; // current mouse position (normalized)
@@ -2300,6 +2324,9 @@ let msrSnapPt        = null; // locked snap point — cursor is within snap thre
 let msrNearPt        = null; // approach point — cursor is near but not yet locked
 let msrSelectedId    = null; // selected measurement id (number) or zone id (string "z<n>")
 let msrSelectedPtIdx = -1;   // for count: which marker is selected (-1 = whole measurement)
+let msrRectDrawStart = null; // scale-zone rectangle drag start point
+let msrSuppressNextClick = false;
+let msrDragState = null;
 
 // Snap cache
 const snapPointsByPage = new Map(); // pageNum → [{x,y}, ...]
@@ -2325,6 +2352,11 @@ function snapHudUpdateCount() {
 function snapHudUpdateState(snapPt, nearPt) {
   const el = document.getElementById('snap-hud-state');
   if (!el) return;
+  if (!msrSnapEnabled) {
+    el.textContent = 'Snap off';
+    el.style.color = '#888';
+    return;
+  }
   if (snapPt) {
     el.textContent = '■ SNAP LOCKED';
     el.style.color = '#00e5ff';
@@ -2352,6 +2384,8 @@ const msrToolEls = {
 };
 const activeScaleLblEl = document.getElementById('active-scale-lbl');
 const clearMeasBtn     = document.getElementById('clear-measurements');
+const snapToggleBtn    = document.getElementById('tool-snap-toggle');
+const scaleZoneShapeEl = document.getElementById('scale-zone-shape');
 
 // Element refs — scale zone dialog
 const szDialogEl    = document.getElementById('sz-dialog');
@@ -2391,8 +2425,35 @@ function msrSetTool(t) {
 
 Object.entries(msrToolEls).forEach(([t, btn]) => btn?.addEventListener('click', () => msrSetTool(t)));
 
+function updateSnapToggleUi() {
+  snapToggleBtn?.classList.toggle('is-active', msrSnapEnabled);
+  if (snapToggleBtn) {
+    snapToggleBtn.textContent = msrSnapEnabled ? '⌖ Snap' : '⌖ Snap off';
+    snapToggleBtn.title = msrSnapEnabled
+      ? 'Vector snapping is on for region drawing and measurements'
+      : 'Vector snapping is off for region drawing and measurements';
+  }
+  const lbl = document.getElementById('snap-status-lbl');
+  if (lbl && !msrSnapEnabled) {
+    lbl.textContent = 'Snap off';
+    lbl.style.color = 'var(--text-dim)';
+    lbl.style.fontWeight = 'normal';
+  }
+  snapHudUpdateState(msrSnapPt, msrNearPt);
+}
+
+snapToggleBtn?.addEventListener('click', () => {
+  msrSnapEnabled = !msrSnapEnabled;
+  msrSnapPt = null;
+  msrNearPt = null;
+  updateSnapToggleUi();
+  msrRedrawOnly();
+});
+updateSnapToggleUi();
+
 clearMeasBtn?.addEventListener('click', () => {
   if (!confirm('Clear all measurements and scale zones on all pages?')) return;
+  saveUndoState();
   Object.keys(measurementsByPage).forEach(k => delete measurementsByPage[k]);
   Object.keys(scaleZonesByPage).forEach(k => delete scaleZonesByPage[k]);
   msrActiveDrawPts = [];
@@ -2444,6 +2505,60 @@ function msrSnapPxDist(pt) {
   if (!msrActiveDrawPts.length) return Infinity;
   const f = msrActiveDrawPts[0];
   return Math.hypot((pt.x - f.x) * canvas.width, (pt.y - f.y) * canvas.height);
+}
+
+function msrRectVertices(a, b) {
+  return [
+    { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y) },
+    { x: Math.max(a.x, b.x), y: Math.min(a.y, b.y) },
+    { x: Math.max(a.x, b.x), y: Math.max(a.y, b.y) },
+    { x: Math.min(a.x, b.x), y: Math.max(a.y, b.y) },
+  ];
+}
+
+function msrScaleZoneShape() {
+  return scaleZoneShapeEl?.value === 'rectangle' ? 'rectangle' : 'polygon';
+}
+
+function msrTranslatePoints(points, dx, dy) {
+  points.forEach(p => {
+    p.x = Math.min(1, Math.max(0, p.x + dx));
+    p.y = Math.min(1, Math.max(0, p.y + dy));
+  });
+}
+
+function msrMovablePointsForSelection() {
+  if (typeof msrSelectedId === 'string' && msrSelectedId.startsWith('z')) {
+    const zid = parseInt(msrSelectedId.slice(1), 10);
+    return (scaleZonesByPage[currentPage] || []).find(z => z.id === zid)?.vertices || [];
+  }
+
+  const m = (measurementsByPage[currentPage] || []).find(x => x.id === msrSelectedId);
+  if (!m) return [];
+  if (m.type === 'count' && msrSelectedPtIdx >= 0) return [m.points[msrSelectedPtIdx]].filter(Boolean);
+  return m.points || [];
+}
+
+function msrClampDeltaForPoints(points, dx, dy) {
+  if (!points.length) return { dx: 0, dy: 0 };
+  const minX = Math.min(...points.map(p => p.x));
+  const maxX = Math.max(...points.map(p => p.x));
+  const minY = Math.min(...points.map(p => p.y));
+  const maxY = Math.max(...points.map(p => p.y));
+  return {
+    dx: Math.min(Math.max(dx, -minX), 1 - maxX),
+    dy: Math.min(Math.max(dy, -minY), 1 - maxY),
+  };
+}
+
+function msrNudgeSelected(dx, dy) {
+  const pts = msrMovablePointsForSelection();
+  if (!pts.length) return false;
+  saveUndoState();
+  const clamped = msrClampDeltaForPoints(pts, dx, dy);
+  msrTranslatePoints(pts, clamped.dx, clamped.dy);
+  redrawRegions();
+  return true;
 }
 
 // ── Scale zone dialog ────────────────────────────────────────────────────────
@@ -2530,6 +2645,7 @@ szOkBtn?.addEventListener('click', () => {
   }
 
   if (!scaleZonesByPage[currentPage]) scaleZonesByPage[currentPage] = [];
+  saveUndoState();
   scaleZonesByPage[currentPage].push({ id: msrIdCounter++, vertices: szPendingPts, mpp, label });
 
   szHideDialog();
@@ -2545,7 +2661,10 @@ function msrOverlayNorm(e) {
   // Dividing by canvas.width would use intrinsic pixels which diverge from CSS
   // size during zoom, causing subsequent measurement clicks to land at wrong positions.
   const r = canvas.getBoundingClientRect();
-  return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height };
+  return {
+    x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+    y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)),
+  };
 }
 
 overlay?.addEventListener('mousemove', (e) => {
@@ -2565,8 +2684,43 @@ overlay?.addEventListener('mouseleave', () => {
   msrRedrawOnly();
 });
 
+overlay?.addEventListener('mousedown', (e) => {
+  if (currentTool !== 'scale-zone' || msrScaleZoneShape() !== 'rectangle') return;
+  if (szDialogEl && !szDialogEl.hidden) return;
+  const raw = msrOverlayNorm(e);
+  const pt = msrFindSnapPt(raw.x, raw.y) || raw;
+  msrRectDrawStart = pt;
+  msrActiveDrawPts = [pt];
+  msrPreviewPt = pt;
+  e.preventDefault();
+  e.stopPropagation();
+  msrRedrawOnly();
+}, true);
+
+window.addEventListener('mouseup', (e) => {
+  if (!msrRectDrawStart || currentTool !== 'scale-zone') return;
+  const raw = msrOverlayNorm(e);
+  const end = msrFindSnapPt(raw.x, raw.y) || raw;
+  const dx = Math.abs((end.x - msrRectDrawStart.x) * canvas.width);
+  const dy = Math.abs((end.y - msrRectDrawStart.y) * canvas.height);
+  msrSuppressNextClick = true;
+  if (dx >= 3 && dy >= 3) {
+    szShowDialog(msrRectVertices(msrRectDrawStart, end));
+  }
+  msrRectDrawStart = null;
+  msrActiveDrawPts = [];
+  msrPreviewPt = null;
+  msrRedrawOnly();
+}, true);
+
 overlay?.addEventListener('click', (e) => {
   if (currentTool === 'select') return;
+  if (msrSuppressNextClick) {
+    msrSuppressNextClick = false;
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
   if (e.detail > 1) return; // handled by dblclick
 
   const raw = msrOverlayNorm(e);
@@ -2596,14 +2750,19 @@ overlay?.addEventListener('click', (e) => {
     case 'linear':
       msrActiveDrawPts.push(pt);
       if (msrActiveDrawPts.length >= 2) {
-        msrFinishLinear([...msrActiveDrawPts]);
-        msrActiveDrawPts = [];
-        msrPreviewPt = null;
+        if (e.metaKey || e.ctrlKey) {
+          msrPreviewPt = null;
+        } else {
+          msrFinishLinear([...msrActiveDrawPts]);
+          msrActiveDrawPts = [];
+          msrPreviewPt = null;
+        }
       }
       break;
 
     case 'area':
     case 'scale-zone':
+      if (currentTool === 'scale-zone' && msrScaleZoneShape() === 'rectangle') return;
       if (msrActiveDrawPts.length >= 3 && msrSnapPxDist(pt) < 15) {
         if (currentTool === 'area') {
           msrFinishArea([...msrActiveDrawPts]);
@@ -2638,6 +2797,7 @@ overlay?.addEventListener('contextmenu', (e) => {
 
 function msrFinishLinear(pts) {
   if (!measurementsByPage[currentPage]) measurementsByPage[currentPage] = [];
+  saveUndoState();
   measurementsByPage[currentPage].push({ id: msrIdCounter++, type: 'linear', points: pts, label: '' });
   redrawRegions();
 }
@@ -2645,12 +2805,14 @@ function msrFinishLinear(pts) {
 function msrFinishArea(pts) {
   if (pts.length < 3) return;
   if (!measurementsByPage[currentPage]) measurementsByPage[currentPage] = [];
+  saveUndoState();
   measurementsByPage[currentPage].push({ id: msrIdCounter++, type: 'area', points: pts, label: '' });
   redrawRegions();
 }
 
 function msrFinishCount(pt) {
   const msrs = measurementsByPage[currentPage] || (measurementsByPage[currentPage] = []);
+  saveUndoState();
   // Add to the last open count group on this page, or start a new one
   const existing = [...msrs].reverse().find(m => m.type === 'count');
   if (existing) {
@@ -2663,6 +2825,7 @@ function msrFinishCount(pt) {
 
 function msrDeleteSelected() {
   if (msrSelectedId === null) return;
+  saveUndoState();
   const id  = msrSelectedId;
   const idx = msrSelectedPtIdx;
   msrSelectedId    = null;
@@ -2695,13 +2858,94 @@ function msrDeleteSelected() {
   redrawRegions();
 }
 
+function msrSnapshotSelectedMove() {
+  if (typeof msrSelectedId === 'string' && msrSelectedId.startsWith('z')) {
+    const zid = parseInt(msrSelectedId.slice(1), 10);
+    const zone = (scaleZonesByPage[currentPage] || []).find(z => z.id === zid);
+    if (!zone) return null;
+    return { kind: 'zone', obj: zone, points: zone.vertices.map(p => ({ x: p.x, y: p.y })) };
+  }
+
+  const m = (measurementsByPage[currentPage] || []).find(x => x.id === msrSelectedId);
+  if (!m) return null;
+  const pointIndexes = ((m.type === 'count' || m.type === 'linear') && msrSelectedPtIdx >= 0)
+    ? [msrSelectedPtIdx]
+    : m.points.map((_, i) => i);
+  return {
+    kind: 'measurement',
+    obj: m,
+    pointIndexes,
+    points: pointIndexes.map(i => ({ x: m.points[i].x, y: m.points[i].y })),
+  };
+}
+
+function msrBeginMoveDrag(evt, id, pointIdx = -1) {
+  if (currentTool !== 'select') return;
+  evt.preventDefault();
+  evt.stopPropagation();
+  msrSelectedId = id;
+  msrSelectedPtIdx = pointIdx;
+  const start = msrOverlayNorm(evt);
+  const snapshot = msrSnapshotSelectedMove();
+  if (!snapshot) return;
+  msrDragState = { start, snapshot, moved: false, undoSaved: false };
+  window.addEventListener('mousemove', msrMoveDragMove, true);
+  window.addEventListener('mouseup', msrMoveDragEnd, true);
+}
+
+function msrMoveDragMove(evt) {
+  if (!msrDragState) return;
+  const p = msrOverlayNorm(evt);
+  let dx = p.x - msrDragState.start.x;
+  let dy = p.y - msrDragState.start.y;
+  if (!msrDragState.moved && Math.hypot(dx * canvas.width, dy * canvas.height) > 2) {
+    msrDragState.moved = true;
+  }
+  if (msrDragState.moved && !msrDragState.undoSaved) {
+    saveUndoState();
+    msrDragState.undoSaved = true;
+  }
+  const basePoints = msrDragState.snapshot.points;
+  const clamped = msrClampDeltaForPoints(basePoints, dx, dy);
+
+  if (msrDragState.snapshot.kind === 'zone') {
+    msrDragState.snapshot.obj.vertices.forEach((pt, i) => {
+      pt.x = basePoints[i].x + clamped.dx;
+      pt.y = basePoints[i].y + clamped.dy;
+    });
+  } else {
+    msrDragState.snapshot.pointIndexes.forEach((pointIdx, i) => {
+      const pt = msrDragState.snapshot.obj.points[pointIdx];
+      pt.x = basePoints[i].x + clamped.dx;
+      pt.y = basePoints[i].y + clamped.dy;
+    });
+  }
+  redrawRegions();
+}
+
+function msrMoveDragEnd() {
+  if (!msrDragState) return;
+  window.removeEventListener('mousemove', msrMoveDragMove, true);
+  window.removeEventListener('mouseup', msrMoveDragEnd, true);
+  msrSuppressNextClick = !!msrDragState.moved;
+  msrDragState = null;
+  redrawRegions();
+}
+
 // ── Value formatters ─────────────────────────────────────────────────────────
 
 function msrFmtLinear(m, dims) {
   if (!dims) return '? m';
   const zone = msrFindZone(m.points[0].x, m.points[0].y, currentPage);
   if (!zone) return '? m';
-  const d = msrNormToMeters(m.points[0].x, m.points[0].y, m.points[1].x, m.points[1].y, dims.width, dims.height, zone.mpp);
+  let d = 0;
+  for (let i = 1; i < m.points.length; i++) {
+    d += msrNormToMeters(
+      m.points[i - 1].x, m.points[i - 1].y,
+      m.points[i].x, m.points[i].y,
+      dims.width, dims.height, zone.mpp
+    );
+  }
   return `${d.toFixed(3)} m${m.label ? '  ' + m.label : ''}`;
 }
 
@@ -2728,10 +2972,15 @@ function msrRenderZones(g) {
     poly.setAttribute('points', pts);
     poly.classList.add('msr-zone-poly');
     if (isSel) poly.classList.add('msr-sel');
+    poly.addEventListener('mousedown', (e) => {
+      msrBeginMoveDrag(e, `z${zone.id}`, -1);
+    });
     poly.addEventListener('click', (e) => {
       if (currentTool !== 'select') return;
+      if (msrSuppressNextClick) { msrSuppressNextClick = false; e.stopPropagation(); return; }
       e.stopPropagation();
       msrSelectedId = `z${zone.id}`;
+      msrSelectedPtIdx = -1;
       redrawRegions();
     });
     poly.addEventListener('dblclick', (e) => {
@@ -2768,48 +3017,80 @@ function msrRenderMeasurements(g) {
 }
 
 function msrRenderLinear(g, m, dims, isSel) {
-  const [p1, p2] = m.points;
-  const x1 = p1.x * canvas.width,  y1 = p1.y * canvas.height;
-  const x2 = p2.x * canvas.width,  y2 = p2.y * canvas.height;
+  if (!m.points || m.points.length < 2) return;
+  const pxPts = m.points.map(p => ({ x: p.x * canvas.width, y: p.y * canvas.height }));
 
   const grp = document.createElementNS(MSR_SVG_NS, 'g');
   grp.classList.add('msr-linear-g');
   if (isSel) grp.classList.add('msr-sel');
 
-  const line = document.createElementNS(MSR_SVG_NS, 'line');
-  line.setAttribute('x1', x1); line.setAttribute('y1', y1);
-  line.setAttribute('x2', x2); line.setAttribute('y2', y2);
-  line.classList.add('msr-line');
-  grp.appendChild(line);
+  for (let i = 1; i < pxPts.length; i++) {
+    const a = pxPts[i - 1], b = pxPts[i];
+    const line = document.createElementNS(MSR_SVG_NS, 'line');
+    line.setAttribute('x1', a.x); line.setAttribute('y1', a.y);
+    line.setAttribute('x2', b.x); line.setAttribute('y2', b.y);
+    line.classList.add('msr-line');
+    grp.appendChild(line);
+  }
 
-  // Perpendicular tick marks at each end
-  const perp = Math.atan2(y2 - y1, x2 - x1) + Math.PI / 2;
   const TICK = 7;
-  [[x1, y1], [x2, y2]].forEach(([tx, ty]) => {
+  pxPts.forEach(({ x: tx, y: ty }, i) => {
+    const prev = pxPts[Math.max(0, i - 1)];
+    const next = pxPts[Math.min(pxPts.length - 1, i + 1)];
+    const perp = Math.atan2(next.y - prev.y, next.x - prev.x) + Math.PI / 2;
     const tick = document.createElementNS(MSR_SVG_NS, 'line');
     tick.setAttribute('x1', tx + Math.cos(perp) * TICK); tick.setAttribute('y1', ty + Math.sin(perp) * TICK);
     tick.setAttribute('x2', tx - Math.cos(perp) * TICK); tick.setAttribute('y2', ty - Math.sin(perp) * TICK);
     tick.classList.add('msr-tick');
     grp.appendChild(tick);
+
+    const handle = document.createElementNS(MSR_SVG_NS, 'circle');
+    handle.setAttribute('cx', tx);
+    handle.setAttribute('cy', ty);
+    handle.setAttribute('r', (isSel && msrSelectedPtIdx === i) ? 7 : 5);
+    handle.setAttribute('fill', (isSel && msrSelectedPtIdx === i) ? '#ffd080' : '#f0a040');
+    handle.setAttribute('stroke', '#fff');
+    handle.setAttribute('stroke-width', '1.5');
+    handle.style.cursor = 'grab';
+    handle.addEventListener('mousedown', (e) => {
+      msrBeginMoveDrag(e, m.id, i);
+    });
+    handle.addEventListener('click', (e) => {
+      if (currentTool !== 'select') return;
+      if (msrSuppressNextClick) { msrSuppressNextClick = false; e.stopPropagation(); return; }
+      e.stopPropagation();
+      msrSelectedId = m.id;
+      msrSelectedPtIdx = i;
+      redrawRegions();
+    });
+    grp.appendChild(handle);
   });
 
+  const labelPt = pxPts[Math.floor((pxPts.length - 1) / 2)];
+  const labelNext = pxPts[Math.min(pxPts.length - 1, Math.floor((pxPts.length - 1) / 2) + 1)];
   const lbl = document.createElementNS(MSR_SVG_NS, 'text');
-  lbl.setAttribute('x', (x1 + x2) / 2); lbl.setAttribute('y', (y1 + y2) / 2 - 9);
+  lbl.setAttribute('x', (labelPt.x + labelNext.x) / 2); lbl.setAttribute('y', (labelPt.y + labelNext.y) / 2 - 9);
   lbl.setAttribute('text-anchor', 'middle');
   lbl.classList.add('msr-lbl'); if (isSel) lbl.classList.add('msr-sel');
   lbl.textContent = msrFmtLinear(m, dims);
   grp.appendChild(lbl);
 
-  // Wide invisible hit area for easier clicking
-  const hit = document.createElementNS(MSR_SVG_NS, 'line');
-  hit.setAttribute('x1', x1); hit.setAttribute('y1', y1);
-  hit.setAttribute('x2', x2); hit.setAttribute('y2', y2);
-  hit.setAttribute('stroke', 'transparent'); hit.setAttribute('stroke-width', '14');
-  grp.appendChild(hit);
+  for (let i = 1; i < pxPts.length; i++) {
+    const a = pxPts[i - 1], b = pxPts[i];
+    const hit = document.createElementNS(MSR_SVG_NS, 'line');
+    hit.setAttribute('x1', a.x); hit.setAttribute('y1', a.y);
+    hit.setAttribute('x2', b.x); hit.setAttribute('y2', b.y);
+    hit.setAttribute('stroke', 'transparent'); hit.setAttribute('stroke-width', '14');
+    grp.appendChild(hit);
+  }
 
   grp.style.cursor = 'pointer';
+  grp.addEventListener('mousedown', (e) => {
+    msrBeginMoveDrag(e, m.id, -1);
+  });
   grp.addEventListener('click', (e) => {
     if (currentTool !== 'select') return;
+    if (msrSuppressNextClick) { msrSuppressNextClick = false; e.stopPropagation(); return; }
     e.stopPropagation(); msrSelectedId = m.id; msrSelectedPtIdx = -1; redrawRegions();
   });
   grp.addEventListener('dblclick', (e) => {
@@ -2826,8 +3107,12 @@ function msrRenderArea(g, m, dims, isSel) {
   const poly = document.createElementNS(MSR_SVG_NS, 'polygon');
   poly.setAttribute('points', pts);
   poly.classList.add('msr-area-poly'); if (isSel) poly.classList.add('msr-sel');
+  poly.addEventListener('mousedown', (e) => {
+    msrBeginMoveDrag(e, m.id, -1);
+  });
   poly.addEventListener('click', (e) => {
     if (currentTool !== 'select') return;
+    if (msrSuppressNextClick) { msrSuppressNextClick = false; e.stopPropagation(); return; }
     e.stopPropagation(); msrSelectedId = m.id; msrSelectedPtIdx = -1; redrawRegions();
   });
   poly.addEventListener('dblclick', (e) => {
@@ -2856,8 +3141,12 @@ function msrRenderCount(g, m, isSel) {
     c.setAttribute('cx', cx); c.setAttribute('cy', cy); c.setAttribute('r', isPtSel ? R + 3 : R);
     c.classList.add('msr-count-dot');
     if (isPtSel) c.classList.add('msr-sel');
+    c.addEventListener('mousedown', (e) => {
+      msrBeginMoveDrag(e, m.id, i);
+    });
     c.addEventListener('click', (e) => {
       if (currentTool !== 'select') return;
+      if (msrSuppressNextClick) { msrSuppressNextClick = false; e.stopPropagation(); return; }
       e.stopPropagation();
       msrSelectedId    = m.id;
       msrSelectedPtIdx = i;
@@ -2948,20 +3237,34 @@ function msrRenderPreview(g, dims) {
 
   const all = [...pts, ...(prev ? [prev] : [])];
 
+  if (tool === 'scale-zone' && msrScaleZoneShape() === 'rectangle' && all.length >= 2) {
+    const rectPts = msrRectVertices(all[0], all[1]);
+    const polyEl = document.createElementNS(MSR_SVG_NS, 'polygon');
+    polyEl.setAttribute('points', rectPts.map(p => `${p.x * canvas.width},${p.y * canvas.height}`).join(' '));
+    polyEl.classList.add('msr-preview');
+    polyEl.style.stroke = '#4da3ff';
+    g.appendChild(polyEl);
+    return;
+  }
+
   if (tool === 'linear' && all.length >= 2) {
-    const l = document.createElementNS(MSR_SVG_NS, 'line');
-    l.setAttribute('x1', all[0].x * canvas.width); l.setAttribute('y1', all[0].y * canvas.height);
-    l.setAttribute('x2', all[1].x * canvas.width); l.setAttribute('y2', all[1].y * canvas.height);
-    l.classList.add('msr-preview');
-    g.appendChild(l);
+    const polyEl = document.createElementNS(MSR_SVG_NS, 'polyline');
+    polyEl.setAttribute('points', all.map(p => `${p.x * canvas.width},${p.y * canvas.height}`).join(' '));
+    polyEl.classList.add('msr-preview');
+    g.appendChild(polyEl);
     // Live distance label
     if (dims) {
       const zone = msrFindZone(all[0].x, all[0].y, currentPage);
       if (zone) {
-        const d = msrNormToMeters(all[0].x, all[0].y, all[1].x, all[1].y, dims.width, dims.height, zone.mpp);
+        let d = 0;
+        for (let i = 1; i < all.length; i++) {
+          d += msrNormToMeters(all[i - 1].x, all[i - 1].y, all[i].x, all[i].y, dims.width, dims.height, zone.mpp);
+        }
+        const midA = all[Math.floor((all.length - 1) / 2)];
+        const midB = all[Math.min(all.length - 1, Math.floor((all.length - 1) / 2) + 1)];
         const lbl = document.createElementNS(MSR_SVG_NS, 'text');
-        lbl.setAttribute('x', (all[0].x + all[1].x) / 2 * canvas.width);
-        lbl.setAttribute('y', (all[0].y + all[1].y) / 2 * canvas.height - 9);
+        lbl.setAttribute('x', (midA.x + midB.x) / 2 * canvas.width);
+        lbl.setAttribute('y', (midA.y + midB.y) / 2 * canvas.height - 9);
         lbl.setAttribute('text-anchor', 'middle');
         lbl.classList.add('msr-lbl'); lbl.style.opacity = '0.55';
         lbl.textContent = `${d.toFixed(3)} m`;
@@ -3015,7 +3318,11 @@ function msrRedrawOnly() {
   // Update snap status badge
   const lbl = document.getElementById('snap-status-lbl');
   if (lbl) {
-    if (msrSnapPt) {
+    if (!msrSnapEnabled) {
+      lbl.textContent = 'Snap off';
+      lbl.style.color = 'var(--text-dim)';
+      lbl.style.fontWeight = 'normal';
+    } else if (msrSnapPt) {
       lbl.textContent = '■ SNAP LOCKED';
       lbl.style.color = '#00e5ff';
       lbl.style.fontWeight = 'bold';
@@ -3270,6 +3577,7 @@ async function msrBuildSnapCache(pageNum) {
 }
 
 function msrFindSnapPt(nx, ny, threshPx = 18) {
+  if (!msrSnapEnabled) return null;
   const pts = snapPointsByPage.get(currentPage);
   const segs = snapSegmentsByPage.get(currentPage) || [];
   if ((!pts || !pts.length) && !segs.length) return null;
@@ -3334,6 +3642,7 @@ function msrUpdateInfoPane() {
       const row = msrPnlRow('⊞', zone, zone.label, null, isSel,
         () => { msrSelectedId = `z${zone.id}`; msrSelectedPtIdx = -1; redrawRegions(); },
         () => {
+          saveUndoState();
           scaleZonesByPage[currentPage] = scaleZonesByPage[currentPage].filter(z => z.id !== zone.id);
           if (msrSelectedId === `z${zone.id}`) { msrSelectedId = null; }
           redrawRegions();
@@ -3355,6 +3664,7 @@ function msrUpdateInfoPane() {
       const row = msrPnlRow(icon, m, null, value, isSel,
         () => { msrSelectedId = m.id; msrSelectedPtIdx = -1; redrawRegions(); },
         () => {
+          saveUndoState();
           measurementsByPage[currentPage] = measurementsByPage[currentPage].filter(x => x.id !== m.id);
           if (msrSelectedId === m.id) { msrSelectedId = null; msrSelectedPtIdx = -1; }
           redrawRegions();
@@ -3381,6 +3691,7 @@ function msrUpdateInfoPane() {
           del.className = 'msr-pnl-del'; del.textContent = '×'; del.title = 'Delete this marker';
           del.addEventListener('click', e => {
             e.stopPropagation();
+            saveUndoState();
             m.points.splice(i, 1);
             if (!m.points.length) measurementsByPage[currentPage] = measurementsByPage[currentPage].filter(x => x.id !== m.id);
             if (msrSelectedId === m.id) { msrSelectedPtIdx = -1; }

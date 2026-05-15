@@ -118,7 +118,8 @@
       border-bottom: 1px solid var(--border);
       z-index: 9;
     }
-    .btn-tool.is-active { background: var(--accent); color: #fff; border-color: var(--accent-dk); }
+    .btn-tool.is-active,
+    .btn-toggle.is-active { background: var(--accent); color: #fff; border-color: var(--accent-dk); }
 
     /* ── Scale zone dialog ──────────────────────────────────── */
     #sz-backdrop {
@@ -171,6 +172,7 @@
     .msr-tick { stroke: #f0a040; stroke-width: 2; pointer-events: none; }
     .msr-linear-g { pointer-events: none; }
     #overlay.tool-select .msr-linear-g { pointer-events: visiblePainted; cursor: pointer; }
+    #overlay.tool-select .msr-linear-g circle { pointer-events: visiblePainted; cursor: grab; }
     .msr-linear-g.msr-sel .msr-line,
     .msr-linear-g.msr-sel .msr-tick { stroke: #ffd080; stroke-width: 3; }
     .msr-area-poly {
@@ -567,6 +569,11 @@
     <input type="number" id="screen-dpi-input" min="72" max="600" step="1"
            style="width:52px;text-align:center"
            title="Screen DPI — 96 = CSS standard. Increase for HiDPI/Retina displays. Typical MacBook: 110–130.">
+
+    <div class="toolbar-sep"></div>
+
+    <button id="tool-snap-toggle" class="btn btn-default btn-toggle is-active"
+            title="Toggle vector snapping for region drawing and measurements">⌖ Snap</button>
   </div>
 
   <!-- ── MEASURE TOOLBAR ──────────────────────────────────────── -->
@@ -576,6 +583,10 @@
     <div class="toolbar-sep"></div>
     <span class="toolbar-label">Measure:</span>
     <button id="tool-scale-zone" class="btn btn-default btn-tool" title="Draw a scale zone polygon">⊞ Scale Zone</button>
+    <select id="scale-zone-shape" title="Scale zone drawing shape" style="width:92px;height:30px;font-size:11px">
+      <option value="polygon">Polyline</option>
+      <option value="rectangle">Rectangle</option>
+    </select>
     <button id="tool-linear"     class="btn btn-default btn-tool" title="Linear distance — click 2 points">↔ Linear</button>
     <button id="tool-area"       class="btn btn-default btn-tool" title="Measure area — click polygon, click first point to close">⬡ Area</button>
     <button id="tool-count"      class="btn btn-default btn-tool" title="Count items — click to place numbered markers">⊕ Count</button>
