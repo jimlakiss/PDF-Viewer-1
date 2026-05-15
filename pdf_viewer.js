@@ -21,6 +21,7 @@ const fitWidthBtn  = document.getElementById("fit-width");
 const pdfScroll   = document.getElementById("pdf-scroll");
 const canvasOuter = document.getElementById("canvas-outer");
 const overlay     = document.getElementById("overlay");
+overlay?.classList.add('tool-select'); // currentTool starts as 'select'
 const regionTypeSelect = document.getElementById("region-type");
 const drawTypeSwatch = document.getElementById("draw-type-swatch");
 const preparedByInput = document.getElementById("prepared-by");
@@ -35,7 +36,8 @@ let TEMPLATE_MASTER_PAGE = null;
 let pdfDoc = null;
 let pdfRawBytes = null;   // raw Uint8Array — used by pdf-lib for splitting
 let currentPage = 1;
-let scale = 1.5;
+let screenDPI = Math.max(72, Math.min(600, parseInt(localStorage.getItem('screenDPI') || '136', 10)));
+let scale = screenDPI / 72; // actual size; recalculated per-load by autoFitScale()
 let pdfFileBaseName = "pdf_extracted_data";
 let multiPdfDocs = [];
 let isMultiPdfMode = false;
@@ -77,12 +79,54 @@ let recenterAfterRender = false;
 let currentTool = 'select'; // 'select' | 'scale-zone' | 'linear' | 'area' | 'count'
 const thumbnailDataCache = new Map();
 
-const ZOOM_SNAP = [0.10, 0.20, 0.25, 0.33, 0.50, 0.67, 0.75, 1.00, 1.25, 1.50, 2.00, 2.50, 3.00, 4.00, 5.00];
+// 1 CSS inch = 96px; 1 PDF point = 1/72 inch → actual-size scale = 96/72
+// display% = scale / ACTUAL_SIZE_SCALE * 100  →  100% = actual physical paper size
+let ACTUAL_SIZE_SCALE = screenDPI / 72;
+const ZOOM_SNAP_PCT = [10, 25, 33, 50, 75, 100, 125, 150, 175, 200, 250, 300, 400, 500];
+let ZOOM_SNAP = ZOOM_SNAP_PCT.map(p => p / 100 * ACTUAL_SIZE_SCALE);
+
+function applyScreenDPI(dpi) {
+  screenDPI = Math.max(72, Math.min(600, dpi));
+  ACTUAL_SIZE_SCALE = screenDPI / 72;
+  ZOOM_SNAP = ZOOM_SNAP_PCT.map(p => p / 100 * ACTUAL_SIZE_SCALE);
+  localStorage.setItem('screenDPI', String(screenDPI));
+  const el = document.getElementById('screen-dpi-input');
+  if (el) el.value = screenDPI;
+  if (pdfDoc) renderPage(currentPage);
+}
+
+(function initScreenDpiInput() {
+  const el = document.getElementById('screen-dpi-input');
+  if (!el) return;
+  el.value = screenDPI;
+  el.addEventListener('change', () => {
+    const v = parseInt(el.value, 10);
+    if (Number.isFinite(v) && v >= 72 && v <= 600) applyScreenDPI(v);
+    else el.value = screenDPI;
+  });
+  el.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
+    if (e.key === 'Escape') { el.value = screenDPI; el.blur(); }
+  });
+})();
+
+const pageSizeLblEl = document.getElementById('page-size-lbl');
+const MM_PER_POINT  = 25.4 / 72;
 
 function updateControls() {
   if (pageInputEl) pageInputEl.value = pdfDoc ? currentPage : '—';
   if (pageTotalEl) pageTotalEl.textContent = pdfDoc ? pdfDoc.numPages : '—';
-  if (zoomInputEl) zoomInputEl.value = pdfDoc ? `${Math.round(scale * 100)}%` : '—';
+  if (zoomInputEl) zoomInputEl.value = pdfDoc ? `${Math.round(scale / ACTUAL_SIZE_SCALE * 100)}%` : '—';
+  if (pageSizeLblEl) {
+    const dims = pageBaseDimsCache.get(currentPage);
+    if (dims) {
+      const w = Math.round(dims.width  * MM_PER_POINT);
+      const h = Math.round(dims.height * MM_PER_POINT);
+      pageSizeLblEl.textContent = `${w} × ${h} mm`;
+    } else {
+      pageSizeLblEl.textContent = '';
+    }
+  }
 }
 
 // ghostExclusions variable
@@ -294,7 +338,7 @@ async function handleSelectedPDFs(selectedFiles, source = "picker") {
   multiPdfDocs = [];
   isMultiPdfMode = false;
   currentPage = 1;
-  scale = 1.5;
+  scale = ACTUAL_SIZE_SCALE;
   selectedRegionIds = [];
   selectedRegionId = null;
   regionIdCounter = 1;
@@ -326,6 +370,8 @@ async function handleSelectedPDFs(selectedFiles, source = "picker") {
       });
       
       pdfDoc = await loadingTask.promise;
+      snapPointsByPage.clear(); // invalidate snap cache for previous PDF
+      snapSegmentsByPage.clear();
       const pageCount = pdfDoc.numPages;
       console.log(`✅ PDF loaded: ${pageCount} pages (${fileSizeMB.toFixed(1)} MB)`);
       
@@ -349,6 +395,7 @@ async function handleSelectedPDFs(selectedFiles, source = "picker") {
       console.log(`🖼️ Starting thumbnail build for ${pageCount} pages...`);
       await buildThumbnails();
       console.log('📄 Rendering first page...');
+      autoFitScale();
       recenterAfterRender = true;
       await renderPage(1);
       console.log('✅ PDF ready');
@@ -405,7 +452,7 @@ async function loadMultiplePDFs(files) {
   multiPdfDocs = [];
   isMultiPdfMode = true;
   currentPage = 1;
-  scale = 1.5;
+  scale = ACTUAL_SIZE_SCALE;
   selectedRegionIds = [];
   selectedRegionId = null;
   regionIdCounter = 1;
@@ -476,10 +523,13 @@ async function loadMultiplePDFs(files) {
       throw new Error(`Page ${pageNum} not found`);
     },
   };
+  snapPointsByPage.clear(); // invalidate snap cache for previous PDF set
+  snapSegmentsByPage.clear();
 
   console.log(`🖼️ Building thumbnails for ${totalPages} combined pages...`);
   await buildThumbnails();
   console.log('📄 Rendering first page...');
+  await autoFitScale();
   recenterAfterRender = true;
   await renderPage(1);
   console.log('✅ Combined PDF ready');
@@ -493,6 +543,10 @@ projectIdInput?.addEventListener("input", () => {
   documentDetails.project_id = projectIdInput.value || "";
 });
 
+function autoFitScale() {
+  scale = ACTUAL_SIZE_SCALE;
+}
+
 async function renderPage(pageNum) {
   if (!pdfDoc) return;
 
@@ -501,13 +555,19 @@ async function renderPage(pageNum) {
     currentRenderTask = null;
   }
 
+  const isPageChange = currentPage !== pageNum;
   currentPage = pageNum;
-  selectedRegionIds = [];
-  selectedRegionId = null;
-  msrActiveDrawPts = [];
-  msrPreviewPt = null;
-  msrSelectedId = null;
-  szRefState = null;
+  if (isPageChange) {
+    selectedRegionIds = [];
+    selectedRegionId = null;
+    msrActiveDrawPts = [];
+    msrPreviewPt     = null;
+    msrSnapPt        = null;
+    msrNearPt        = null;
+    msrSelectedId    = null;
+    msrSelectedPtIdx = -1;
+    szRefState       = null;
+  }
 
   let page;
   try {
@@ -592,6 +652,7 @@ async function renderPage(pageNum) {
 
   highlightActiveThumb();
   redrawRegions();
+  msrBuildSnapCache(pageNum); // async, non-blocking
 
   if (page?.cleanup) page.cleanup();
   page = null;
@@ -684,7 +745,7 @@ function commitZoomInput() {
     updateControls();
     return;
   }
-  zoomToCenter(pct / 100);
+  zoomToCenter(pct / 100 * ACTUAL_SIZE_SCALE);
 }
 
 zoomInputEl?.addEventListener("keydown", (e) => {
@@ -759,7 +820,7 @@ async function loadThumbnail(pageNum) {
     const viewport = page.getViewport({ scale: THUMB_SCALE });
 
     const tempCanvas = document.createElement("canvas");
-    const maxWidth = 180;
+    const maxWidth = 360;
     const scaleFactor = Math.min(1, maxWidth / viewport.width);
     tempCanvas.width = viewport.width * scaleFactor;
     tempCanvas.height = viewport.height * scaleFactor;
@@ -818,6 +879,19 @@ function highlightActiveThumb() {
 function getOverlayPoint(evt) {
   const r = overlay.getBoundingClientRect();
   return { x: evt.clientX - r.left, y: evt.clientY - r.top };
+}
+
+function regionSnapPointFromEvent(evt) {
+  const r = overlay.getBoundingClientRect();
+  const raw = {
+    x: r.width ? (evt.clientX - r.left) / r.width : 0,
+    y: r.height ? (evt.clientY - r.top) / r.height : 0,
+  };
+  const clamped = {
+    x: Math.min(1, Math.max(0, raw.x)),
+    y: Math.min(1, Math.max(0, raw.y)),
+  };
+  return msrFindSnapPt(clamped.x, clamped.y, 18) || clamped;
 }
 
 function updateLastPointerNormFromEvent(evt) {
@@ -928,9 +1002,9 @@ overlay?.addEventListener("mousedown", (e) => {
   isDrawing = true;
   selectedRegionIds = [];
   selectedRegionId = null;
-  const r = overlay.getBoundingClientRect();
-  startX = e.clientX - r.left;
-  startY = e.clientY - r.top;
+  const p = regionSnapPointFromEvent(e);
+  startX = p.x * canvas.width;
+  startY = p.y * canvas.height;
   activeRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
   activeRect.setAttribute("fill", "rgba(0, 123, 255, 0.2)");
   activeRect.setAttribute("stroke", "#007bff");
@@ -942,9 +1016,9 @@ overlay?.addEventListener("mousemove", (e) => {
   if (currentTool !== 'select') return;
   if (isDraggingRegions) return;
   if (!isDrawing || !activeRect) return;
-  const r = overlay.getBoundingClientRect();
-  const x = e.clientX - r.left;
-  const y = e.clientY - r.top;
+  const p = regionSnapPointFromEvent(e);
+  const x = p.x * canvas.width;
+  const y = p.y * canvas.height;
   activeRect.setAttribute("x", Math.min(startX, x));
   activeRect.setAttribute("y", Math.min(startY, y));
   activeRect.setAttribute("width", Math.abs(x - startX));
@@ -997,30 +1071,36 @@ if (REGION_TYPES.includes(region.type)) {
 });
 
 function msrEnsureGroups() {
-  let zonesG = overlay.querySelector('.msr-zones-g');
-  let regionsG = overlay.querySelector('.msr-regions-g');
-  let measG = overlay.querySelector('.msr-meas-g');
+  let zonesG    = overlay.querySelector('.msr-zones-g');
+  let regionsG  = overlay.querySelector('.msr-regions-g');
+  let snapPtsG  = overlay.querySelector('.msr-snap-pts-g');
+  let measG     = overlay.querySelector('.msr-meas-g');
   if (!regionsG) {
     overlay.innerHTML = '';
-    zonesG   = document.createElementNS("http://www.w3.org/2000/svg", 'g');
-    regionsG = document.createElementNS("http://www.w3.org/2000/svg", 'g');
-    measG    = document.createElementNS("http://www.w3.org/2000/svg", 'g');
+    zonesG    = document.createElementNS("http://www.w3.org/2000/svg", 'g');
+    regionsG  = document.createElementNS("http://www.w3.org/2000/svg", 'g');
+    snapPtsG  = document.createElementNS("http://www.w3.org/2000/svg", 'g');
+    measG     = document.createElementNS("http://www.w3.org/2000/svg", 'g');
     zonesG.classList.add('msr-zones-g');
     regionsG.classList.add('msr-regions-g');
+    snapPtsG.classList.add('msr-snap-pts-g');
     measG.classList.add('msr-meas-g');
     overlay.appendChild(zonesG);
     overlay.appendChild(regionsG);
+    overlay.appendChild(snapPtsG);
     overlay.appendChild(measG);
   }
-  return { zonesG, regionsG, measG };
+  return { zonesG, regionsG, snapPtsG, measG };
 }
 
 function redrawRegions() {
   if (!overlay) return;
-  const { zonesG, regionsG, measG } = msrEnsureGroups();
+  const { zonesG, regionsG, snapPtsG, measG } = msrEnsureGroups();
   zonesG.innerHTML   = '';
   regionsG.innerHTML = '';
   measG.innerHTML    = '';
+  snapPtsG.innerHTML  = '';
+  if (msrShowSnapDebug) msrRenderSnapMarkers(snapPtsG);
 
   msrRenderZones(zonesG);
 
@@ -1117,6 +1197,7 @@ regionsByPage[currentPage] = pageRegions.filter(r => !r.isGhost || selectedSet.h
 
   msrRenderMeasurements(measG);
   msrUpdateScaleLabel();
+  msrUpdateInfoPane();
 }
 
 function syncLegacySelectedId() {
@@ -2212,9 +2293,49 @@ const pageBaseDimsCache  = new Map(); // pageNum → { width, height } in PDF pt
 let   msrIdCounter       = 1;
 
 // Drawing state
+let msrShowSnapDebug = false; // toggle: render all cached snap points as dots
 let msrActiveDrawPts = [];   // normalized points being placed
 let msrPreviewPt     = null; // current mouse position (normalized)
+let msrSnapPt        = null; // locked snap point — cursor is within snap threshold
+let msrNearPt        = null; // approach point — cursor is near but not yet locked
 let msrSelectedId    = null; // selected measurement id (number) or zone id (string "z<n>")
+let msrSelectedPtIdx = -1;   // for count: which marker is selected (-1 = whole measurement)
+
+// Snap cache
+const snapPointsByPage = new Map(); // pageNum → [{x,y}, ...]
+const snapSegmentsByPage = new Map(); // pageNum → [{a:{x,y}, b:{x,y}}, ...]
+
+// ── Snap HUD helpers ─────────────────────────────────────────────────────────
+function snapHudUpdateCount() {
+  const el = document.getElementById('snap-hud-pts');
+  if (!el) return;
+  const pts = snapPointsByPage.get(currentPage);
+  if (!pts) {
+    el.textContent = 'Snap pts: building…';
+    el.style.color = '#888';
+  } else if (pts.length === 0) {
+    el.textContent = '⚠ 0 snap pts — raster PDF?';
+    el.style.color = '#ff8800';
+  } else {
+    el.textContent = `✓ ${pts.length} snap pts`;
+    el.style.color = '#00e5ff';
+  }
+}
+
+function snapHudUpdateState(snapPt, nearPt) {
+  const el = document.getElementById('snap-hud-state');
+  if (!el) return;
+  if (snapPt) {
+    el.textContent = '■ SNAP LOCKED';
+    el.style.color = '#00e5ff';
+  } else if (nearPt) {
+    el.textContent = '◈ Approaching';
+    el.style.color = '#ffaa00';
+  } else {
+    el.textContent = '─ No snap';
+    el.style.color = '#666';
+  }
+}
 
 // Scale zone dialog state
 let szPendingPts  = null;   // polygon verts waiting for dialog
@@ -2253,12 +2374,18 @@ function msrSetTool(t) {
   currentTool      = t;
   msrActiveDrawPts = [];
   msrPreviewPt     = null;
+  msrSnapPt        = null;
+  msrNearPt        = null;
   msrSelectedId    = null;
+  msrSelectedPtIdx = -1;
   szRefState       = null;
   Object.entries(msrToolEls).forEach(([k, btn]) => {
     if (btn) btn.classList.toggle('is-active', k === t);
   });
-  if (overlay) overlay.style.cursor = (t === 'select') ? 'crosshair' : 'crosshair';
+  if (overlay) {
+    overlay.style.cursor = 'crosshair';
+    overlay.classList.toggle('tool-select', t === 'select');
+  }
   msrRedrawOnly();
 }
 
@@ -2413,13 +2540,28 @@ szOkBtn?.addEventListener('click', () => {
 // ── Overlay event handlers for measurement tools ─────────────────────────────
 
 function msrOverlayNorm(e) {
-  const r = overlay.getBoundingClientRect();
-  return { x: (e.clientX - r.left) / canvas.width, y: (e.clientY - r.top) / canvas.height };
+  // Always use the canvas's live CSS bounding rect so coordinates stay correct
+  // during intermediate CSS-zoom states (before the debounce re-render fires).
+  // Dividing by canvas.width would use intrinsic pixels which diverge from CSS
+  // size during zoom, causing subsequent measurement clicks to land at wrong positions.
+  const r = canvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height };
 }
 
 overlay?.addEventListener('mousemove', (e) => {
+  if (currentTool === 'select') { overlay.style.cursor = ''; return; }
+  overlay.style.cursor = 'crosshair';
+  const raw    = msrOverlayNorm(e);
+  msrSnapPt    = msrFindSnapPt(raw.x, raw.y, 18);
+  msrNearPt    = msrSnapPt ? null : msrFindSnapPt(raw.x, raw.y, 48);
+  msrPreviewPt = msrSnapPt || raw;
+  snapHudUpdateState(msrSnapPt, msrNearPt);
+  msrRedrawOnly();
+});
+
+overlay?.addEventListener('mouseleave', () => {
   if (currentTool === 'select') return;
-  msrPreviewPt = msrOverlayNorm(e);
+  msrSnapPt = null; msrNearPt = null; msrPreviewPt = null;
   msrRedrawOnly();
 });
 
@@ -2427,7 +2569,8 @@ overlay?.addEventListener('click', (e) => {
   if (currentTool === 'select') return;
   if (e.detail > 1) return; // handled by dblclick
 
-  const pt = msrOverlayNorm(e);
+  const raw = msrOverlayNorm(e);
+  const pt  = msrFindSnapPt(raw.x, raw.y) || raw;
 
   // Reference line point collection (dialog open, ref tab active)
   if (szDialogEl && !szDialogEl.hidden && szActiveTab === 'ref' && szRefState?.phase === 'drawing') {
@@ -2520,8 +2663,23 @@ function msrFinishCount(pt) {
 
 function msrDeleteSelected() {
   if (msrSelectedId === null) return;
-  const id = msrSelectedId;
-  msrSelectedId = null;
+  const id  = msrSelectedId;
+  const idx = msrSelectedPtIdx;
+  msrSelectedId    = null;
+  msrSelectedPtIdx = -1;
+
+  // Count marker point deletion
+  if (idx >= 0) {
+    const msr = (measurementsByPage[currentPage] || []).find(m => m.id === id);
+    if (msr && msr.type === 'count') {
+      msr.points.splice(idx, 1);
+      if (msr.points.length === 0) {
+        measurementsByPage[currentPage] = measurementsByPage[currentPage].filter(m => m.id !== id);
+      }
+    }
+    redrawRegions();
+    return;
+  }
 
   // Zone delete
   if (typeof id === 'string' && id.startsWith('z')) {
@@ -2530,7 +2688,6 @@ function msrDeleteSelected() {
       scaleZonesByPage[currentPage] = scaleZonesByPage[currentPage].filter(z => z.id !== zid);
     }
   } else {
-    // Measurement delete
     if (measurementsByPage[currentPage]) {
       measurementsByPage[currentPage] = measurementsByPage[currentPage].filter(m => m.id !== id);
     }
@@ -2653,7 +2810,7 @@ function msrRenderLinear(g, m, dims, isSel) {
   grp.style.cursor = 'pointer';
   grp.addEventListener('click', (e) => {
     if (currentTool !== 'select') return;
-    e.stopPropagation(); msrSelectedId = m.id; redrawRegions();
+    e.stopPropagation(); msrSelectedId = m.id; msrSelectedPtIdx = -1; redrawRegions();
   });
   grp.addEventListener('dblclick', (e) => {
     if (currentTool !== 'select') return;
@@ -2671,7 +2828,7 @@ function msrRenderArea(g, m, dims, isSel) {
   poly.classList.add('msr-area-poly'); if (isSel) poly.classList.add('msr-sel');
   poly.addEventListener('click', (e) => {
     if (currentTool !== 'select') return;
-    e.stopPropagation(); msrSelectedId = m.id; redrawRegions();
+    e.stopPropagation(); msrSelectedId = m.id; msrSelectedPtIdx = -1; redrawRegions();
   });
   poly.addEventListener('dblclick', (e) => {
     if (currentTool !== 'select') return;
@@ -2694,12 +2851,17 @@ function msrRenderCount(g, m, isSel) {
   const R = 9;
   m.points.forEach((p, i) => {
     const cx = p.x * canvas.width, cy = p.y * canvas.height;
+    const isPtSel = isSel && msrSelectedPtIdx === i;
     const c = document.createElementNS(MSR_SVG_NS, 'circle');
-    c.setAttribute('cx', cx); c.setAttribute('cy', cy); c.setAttribute('r', R);
-    c.classList.add('msr-count-dot'); if (isSel) c.classList.add('msr-sel');
+    c.setAttribute('cx', cx); c.setAttribute('cy', cy); c.setAttribute('r', isPtSel ? R + 3 : R);
+    c.classList.add('msr-count-dot');
+    if (isPtSel) c.classList.add('msr-sel');
     c.addEventListener('click', (e) => {
       if (currentTool !== 'select') return;
-      e.stopPropagation(); msrSelectedId = m.id; redrawRegions();
+      e.stopPropagation();
+      msrSelectedId    = m.id;
+      msrSelectedPtIdx = i;
+      redrawRegions();
     });
     g.appendChild(c);
     const num = document.createElementNS(MSR_SVG_NS, 'text');
@@ -2721,7 +2883,50 @@ function msrRenderCount(g, m, isSel) {
   }
 }
 
+function msrMakeSvg(tag, attrs) {
+  const el = document.createElementNS(MSR_SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  el.setAttribute('pointer-events', 'none');
+  return el;
+}
+
 function msrRenderPreview(g, dims) {
+  const inDialog = szDialogEl && !szDialogEl.hidden && szActiveTab !== 'ref';
+
+  // ── Approach: amber dashed ring + filled circle (no <rect> — CSS #overlay rect overrides fill) ──
+  if (msrNearPt && !inDialog) {
+    const nx = msrNearPt.x * canvas.width, ny = msrNearPt.y * canvas.height;
+    g.appendChild(msrMakeSvg('circle', {
+      cx: nx, cy: ny, r: 18,
+      fill: 'none', stroke: '#ffaa00', 'stroke-width': 2, 'stroke-dasharray': '5 4',
+    }));
+    g.appendChild(msrMakeSvg('circle', {
+      cx: nx, cy: ny, r: 7,
+      fill: 'rgba(255,170,0,0.45)', stroke: '#ffaa00', 'stroke-width': 1.5,
+    }));
+  }
+
+  // ── Locked snap: glow ring + diamond polygon + crosshairs + dot ──
+  if (msrSnapPt && !inDialog) {
+    const sx = msrSnapPt.x * canvas.width, sy = msrSnapPt.y * canvas.height;
+    const D = 11, ARM = 22;
+    // outer glow ring
+    g.appendChild(msrMakeSvg('circle', {
+      cx: sx, cy: sy, r: 22,
+      fill: 'none', stroke: 'rgba(0,229,255,0.35)', 'stroke-width': 10,
+    }));
+    // crosshair arms
+    g.appendChild(msrMakeSvg('line', { x1:sx-ARM, y1:sy, x2:sx+ARM, y2:sy, stroke:'#00e5ff', 'stroke-width': 2 }));
+    g.appendChild(msrMakeSvg('line', { x1:sx, y1:sy-ARM, x2:sx, y2:sy+ARM, stroke:'#00e5ff', 'stroke-width': 2 }));
+    // filled diamond (polygon avoids the #overlay rect CSS override)
+    g.appendChild(msrMakeSvg('polygon', {
+      points: `${sx},${sy-D} ${sx+D},${sy} ${sx},${sy+D} ${sx-D},${sy}`,
+      fill: 'rgba(0,229,255,0.7)', stroke: '#00e5ff', 'stroke-width': 2,
+    }));
+    // centre dot
+    g.appendChild(msrMakeSvg('circle', { cx:sx, cy:sy, r:3, fill:'#00e5ff' }));
+  }
+
   const tool = currentTool;
   const pts  = msrActiveDrawPts;
   const prev = msrPreviewPt;
@@ -2804,7 +3009,425 @@ function msrRedrawOnly() {
   const measG = overlay?.querySelector('.msr-meas-g');
   if (!measG) { redrawRegions(); return; }
   measG.innerHTML = '';
+  if (msrShowSnapDebug) msrRenderSnapDebug(measG);
   msrRenderMeasurements(measG);
+
+  // Update snap status badge
+  const lbl = document.getElementById('snap-status-lbl');
+  if (lbl) {
+    if (msrSnapPt) {
+      lbl.textContent = '■ SNAP LOCKED';
+      lbl.style.color = '#00e5ff';
+      lbl.style.fontWeight = 'bold';
+    } else if (msrNearPt) {
+      lbl.textContent = '◈ Near snap';
+      lbl.style.color = '#ffaa00';
+      lbl.style.fontWeight = 'normal';
+    } else {
+      lbl.textContent = '– No snap';
+      lbl.style.color = 'var(--text-dim)';
+      lbl.style.fontWeight = 'normal';
+    }
+  }
+}
+
+// Renders all cached snap points as always-visible squares on the snap-pts layer.
+// Call once after cache builds; also called by redrawRegions (zoom/page change).
+function msrRenderSnapMarkers(g) {
+  g.innerHTML = '';
+  const pts = snapPointsByPage.get(currentPage);
+  if (!pts || !pts.length || !canvas.width) return;
+  const W = canvas.width, H = canvas.height;
+  // Use <circle> not <rect> — the CSS rule `#overlay rect{fill:...}` would
+  // override rect fill/stroke and make them invisible on a white PDF.
+  const frag = document.createDocumentFragment();
+  for (const p of pts) {
+    const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    c.setAttribute('cx', p.x * W);
+    c.setAttribute('cy', p.y * H);
+    c.setAttribute('r', 4);
+    c.setAttribute('fill', 'rgba(0,229,255,0.3)');
+    c.setAttribute('stroke', '#00e5ff');
+    c.setAttribute('stroke-width', '1.5');
+    c.setAttribute('pointer-events', 'none');
+    frag.appendChild(c);
+  }
+  g.appendChild(frag);
+
+  // Update status label with point count so user can confirm cache built
+  const lbl = document.getElementById('snap-status-lbl');
+  if (lbl && !msrSnapPt && !msrNearPt) {
+    lbl.textContent = `– ${pts.length} snap pts`;
+    lbl.style.color = 'var(--text-dim)';
+    lbl.style.fontWeight = 'normal';
+  }
+}
+
+function msrRefreshSnapMarkers() {
+  const snapPtsG = overlay?.querySelector('.msr-snap-pts-g');
+  if (!snapPtsG) return;
+  snapPtsG.innerHTML = '';
+  if (msrShowSnapDebug) msrRenderSnapMarkers(snapPtsG);
+}
+
+function msrRenderSnapDebug(g) {
+  const pts = snapPointsByPage.get(currentPage);
+  if (!pts || !pts.length) return;
+  const W = canvas.width, H = canvas.height;
+  const frag = document.createDocumentFragment();
+  for (const p of pts) {
+    const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    c.setAttribute('cx', p.x * W);
+    c.setAttribute('cy', p.y * H);
+    c.setAttribute('r', 3);
+    c.setAttribute('fill', 'rgba(255,80,0,0.55)');
+    c.setAttribute('stroke', 'none');
+    c.setAttribute('pointer-events', 'none');
+    frag.appendChild(c);
+  }
+  g.appendChild(frag);
+}
+
+document.getElementById('tool-snap-debug')?.addEventListener('click', function () {
+  msrShowSnapDebug = !msrShowSnapDebug;
+  this.classList.toggle('is-active', msrShowSnapDebug);
+  msrRedrawOnly();
+});
+
+// ── Vector snap ──────────────────────────────────────────────────────────────
+
+// pdf.js OPS constants (fallback if pdfjsLib.OPS not accessible at runtime)
+const _PDF_OPS = pdfjsLib.OPS || {
+  save: 3, restore: 4, transform: 12,
+  moveTo: 13, lineTo: 14,
+  curveTo: 15, curveTo1: 16, curveTo2: 16, curveTo3: 17,
+  closePath: 18,
+  rectangle: 20,
+  constructPath: 91,
+};
+
+async function msrBuildSnapCache(pageNum) {
+  if (snapPointsByPage.has(pageNum) || !pdfDoc) return;
+  snapPointsByPage.set(pageNum, []); // sentinel so we don't start twice
+  snapSegmentsByPage.set(pageNum, []);
+  console.log(`📐 Snap: building cache for page ${pageNum}…`);
+
+  let page;
+  try { page = await pdfDoc.getPage(pageNum); } catch { return; }
+
+  const vp  = page.getViewport({ scale: 1.0 });
+  const [ta, tb, tc, td, te, tf] = vp.transform;
+
+  let ops;
+  try { ops = await page.getOperatorList(); } catch { page.cleanup(); return; }
+
+  const { fnArray, argsArray } = ops;
+  const OPS = _PDF_OPS;
+  const raw = [];
+  const rawSegments = [];
+
+  // Track CTM stack so path coordinates are correctly mapped to page space.
+  // PDFs use cm (OPS.transform) to set coordinate systems; without tracking
+  // this, all extracted points land in the wrong position.
+  const ctmStack = [[1, 0, 0, 1, 0, 0]]; // identity
+
+  // Right-multiply: new_CTM = old_CTM × M  (matches canvas2d .transform() semantics)
+  const mulCtm = ([a1,b1,c1,d1,e1,f1], [a2,b2,c2,d2,e2,f2]) => [
+    a1*a2 + c1*b2,  b1*a2 + d1*b2,
+    a1*c2 + c1*d2,  b1*c2 + d1*d2,
+    a1*e2 + c1*f2 + e1,  b1*e2 + d1*f2 + f1,
+  ];
+
+  let dbgMoves = 0, dbgLines = 0, dbgCurves = 0, dbgRects = 0, dbgConstruct = 0, dbgFiltered = 0;
+
+  const normPoint = (lx, ly) => {
+    const [a,b,c,d,e,f] = ctmStack[ctmStack.length - 1];
+    const px = a*lx + c*ly + e;
+    const py = b*lx + d*ly + f;
+    const nx = (ta*px + tc*py + te) / vp.width;
+    const ny = (tb*px + td*py + tf) / vp.height;
+    if (nx < -0.01 || nx > 1.01 || ny < -0.01 || ny > 1.01) {
+      dbgFiltered++;
+      return null;
+    }
+    return { x: nx, y: ny };
+  };
+
+  const push = (lx, ly) => {
+    const p = normPoint(lx, ly);
+    if (p) raw.push(p);
+    return p;
+  };
+
+  const pushSegment = (x1, y1, x2, y2) => {
+    const a = push(x1, y1);
+    const b = push(x2, y2);
+    if (a && b) rawSegments.push({ a, b });
+  };
+
+  const pushRectangle = (x, y, w, h) => {
+    pushSegment(x,     y,     x + w, y);
+    pushSegment(x + w, y,     x + w, y + h);
+    pushSegment(x + w, y + h, x,     y + h);
+    pushSegment(x,     y + h, x,     y);
+  };
+
+  const handleConstructPath = (a) => {
+    const pathOps = a?.[0];
+    const pathArgs = a?.[1];
+    const isArrayLike = (v) => Array.isArray(v) || ArrayBuffer.isView(v);
+    if (!isArrayLike(pathOps) || !isArrayLike(pathArgs)) return;
+
+    let j = 0;
+    let current = null;
+    let subpathStart = null;
+
+    for (const op of pathOps) {
+      if (op === OPS.moveTo) {
+        dbgMoves++;
+        current = { x: pathArgs[j++], y: pathArgs[j++] };
+        subpathStart = current;
+        push(current.x, current.y);
+      } else if (op === OPS.lineTo) {
+        dbgLines++;
+        const next = { x: pathArgs[j++], y: pathArgs[j++] };
+        if (current) pushSegment(current.x, current.y, next.x, next.y);
+        else push(next.x, next.y);
+        current = next;
+      } else if (op === OPS.curveTo) {
+        dbgCurves++;
+        j += 4;
+        current = { x: pathArgs[j++], y: pathArgs[j++] };
+        push(current.x, current.y);
+      } else if (op === OPS.curveTo1 || op === OPS.curveTo2 || op === OPS.curveTo3) {
+        dbgCurves++;
+        j += 2;
+        current = { x: pathArgs[j++], y: pathArgs[j++] };
+        push(current.x, current.y);
+      } else if (op === OPS.rectangle) {
+        dbgRects++;
+        const x = pathArgs[j++], y = pathArgs[j++], w = pathArgs[j++], h = pathArgs[j++];
+        pushRectangle(x, y, w, h);
+        current = { x, y };
+        subpathStart = current;
+      } else if (op === OPS.closePath) {
+        if (current && subpathStart) pushSegment(current.x, current.y, subpathStart.x, subpathStart.y);
+        current = subpathStart;
+      }
+    }
+  };
+
+  let directCurrent = null;
+
+  for (let i = 0; i < fnArray.length && raw.length < 20000; i++) {
+    const fn = fnArray[i], a = argsArray[i];
+    if (fn === OPS.save) {
+      ctmStack.push([...ctmStack[ctmStack.length - 1]]);
+    } else if (fn === OPS.restore) {
+      if (ctmStack.length > 1) ctmStack.pop();
+    } else if (fn === OPS.transform && a) {
+      ctmStack[ctmStack.length - 1] = mulCtm(ctmStack[ctmStack.length - 1], [a[0],a[1],a[2],a[3],a[4],a[5]]);
+    } else if (!a) {
+      // skip ops with no args
+    } else if (fn === OPS.constructPath) { dbgConstruct++; handleConstructPath(a); }
+    else if (fn === OPS.moveTo)  { dbgMoves++; directCurrent = { x: a[0], y: a[1] }; push(a[0], a[1]); }
+    else if   (fn === OPS.lineTo)  {
+      dbgLines++;
+      if (directCurrent) pushSegment(directCurrent.x, directCurrent.y, a[0], a[1]);
+      else push(a[0], a[1]);
+      directCurrent = { x: a[0], y: a[1] };
+    }
+    else if   (fn === OPS.curveTo) { dbgCurves++; directCurrent = { x: a[4], y: a[5] }; push(a[4], a[5]); }
+    else if   (fn === OPS.curveTo1 || fn === OPS.curveTo2 || fn === OPS.curveTo3) { dbgCurves++; directCurrent = { x: a[2], y: a[3] }; push(a[2], a[3]); }
+    else if   (fn === OPS.rectangle) {
+      dbgRects++;
+      pushRectangle(a[0], a[1], a[2], a[3]);
+    }
+  }
+
+  // Deduplicate with O(n) hash
+  const seen = new Set();
+  const pts  = [];
+  for (const p of raw) {
+    const key = `${Math.round(p.x * 8000)},${Math.round(p.y * 8000)}`;
+    if (!seen.has(key)) { seen.add(key); pts.push(p); }
+  }
+
+  snapPointsByPage.set(pageNum, pts);
+  snapSegmentsByPage.set(pageNum, rawSegments);
+  page.cleanup();
+
+  const summary = `total ops:${fnArray.length}  constructPath:${dbgConstruct}  moveTo:${dbgMoves}  lineTo:${dbgLines}  curveTo:${dbgCurves}  rect:${dbgRects}  raw:${raw.length}  segments:${rawSegments.length}  filtered-OOB:${dbgFiltered}  final:${pts.length}`;
+  if (pts.length === 0) {
+    console.warn(`📐 Snap page ${pageNum} — 0 endpoints.\n  ${summary}\n  OPS.moveTo=${OPS.moveTo} OPS.lineTo=${OPS.lineTo} OPS.rectangle=${OPS.rectangle}`);
+  } else {
+    console.log(`📐 Snap page ${pageNum} — ${pts.length} endpoints.\n  ${summary}`);
+  }
+  if (pageNum === currentPage) {
+    msrRefreshSnapMarkers();
+    snapHudUpdateCount();
+  }
+}
+
+function msrFindSnapPt(nx, ny, threshPx = 18) {
+  const pts = snapPointsByPage.get(currentPage);
+  const segs = snapSegmentsByPage.get(currentPage) || [];
+  if ((!pts || !pts.length) && !segs.length) return null;
+  if (!canvas.width || !canvas.height) return null;
+  let bestD = threshPx + 1, best = null;
+  for (const p of pts || []) {
+    const dx = (p.x - nx) * canvas.width;
+    const dy = (p.y - ny) * canvas.height;
+    const d  = Math.sqrt(dx*dx + dy*dy);
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  for (const seg of segs) {
+    const ax = seg.a.x * canvas.width;
+    const ay = seg.a.y * canvas.height;
+    const bx = seg.b.x * canvas.width;
+    const by = seg.b.y * canvas.height;
+    const px = nx * canvas.width;
+    const py = ny * canvas.height;
+    const vx = bx - ax;
+    const vy = by - ay;
+    const len2 = vx*vx + vy*vy;
+    if (len2 < 0.01) continue;
+    const t = Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / len2));
+    const sx = ax + vx * t;
+    const sy = ay + vy * t;
+    const dx = sx - px;
+    const dy = sy - py;
+    const d = Math.sqrt(dx*dx + dy*dy);
+    if (d < bestD) {
+      bestD = d;
+      best = { x: sx / canvas.width, y: sy / canvas.height };
+    }
+  }
+  return best;
+}
+
+// ── Measurement info pane ────────────────────────────────────────────────────
+
+function msrUpdateInfoPane() {
+  const listEl = document.getElementById('msr-pnl-list');
+  if (!listEl) return;
+  listEl.innerHTML = '';
+
+  const dims  = pageBaseDimsCache.get(currentPage) || null;
+  const zones = scaleZonesByPage[currentPage]   || [];
+  const msrs  = measurementsByPage[currentPage] || [];
+
+  if (!zones.length && !msrs.length) {
+    const empty = document.createElement('div');
+    empty.className = 'msr-pnl-empty';
+    empty.textContent = 'No measurements on this page.\nUse the toolbar above to start measuring.';
+    empty.style.whiteSpace = 'pre-line';
+    listEl.appendChild(empty);
+    return;
+  }
+
+  // ── Scale zones ──
+  if (zones.length) {
+    listEl.appendChild(msrPnlSection('Scale Zones'));
+    zones.forEach(zone => {
+      const isSel = msrSelectedId === `z${zone.id}`;
+      const row = msrPnlRow('⊞', zone, zone.label, null, isSel,
+        () => { msrSelectedId = `z${zone.id}`; msrSelectedPtIdx = -1; redrawRegions(); },
+        () => {
+          scaleZonesByPage[currentPage] = scaleZonesByPage[currentPage].filter(z => z.id !== zone.id);
+          if (msrSelectedId === `z${zone.id}`) { msrSelectedId = null; }
+          redrawRegions();
+        }
+      );
+      listEl.appendChild(row);
+    });
+  }
+
+  // ── Measurements ──
+  if (msrs.length) {
+    listEl.appendChild(msrPnlSection('Measurements'));
+    msrs.forEach(m => {
+      const icon  = m.type === 'linear' ? '↔' : m.type === 'area' ? '⬡' : '⊕';
+      const value = m.type === 'linear' ? msrFmtLinear(m, dims)
+                  : m.type === 'area'   ? msrFmtArea(m, dims)
+                  : `n = ${m.points.length}`;
+      const isSel = msrSelectedId === m.id && msrSelectedPtIdx === -1;
+      const row = msrPnlRow(icon, m, null, value, isSel,
+        () => { msrSelectedId = m.id; msrSelectedPtIdx = -1; redrawRegions(); },
+        () => {
+          measurementsByPage[currentPage] = measurementsByPage[currentPage].filter(x => x.id !== m.id);
+          if (msrSelectedId === m.id) { msrSelectedId = null; msrSelectedPtIdx = -1; }
+          redrawRegions();
+        }
+      );
+      listEl.appendChild(row);
+
+      // Count sub-rows (individual markers)
+      if (m.type === 'count') {
+        m.points.forEach((_, i) => {
+          const isPtSel = msrSelectedId === m.id && msrSelectedPtIdx === i;
+          const sub = document.createElement('div');
+          sub.className = 'msr-pnl-row msr-pnl-sub' + (isPtSel ? ' is-sel' : '');
+          sub.title = `Marker ${i + 1}`;
+
+          const ico = document.createElement('span');
+          ico.className = 'msr-pnl-icon'; ico.style.color = '#e74c3c'; ico.textContent = `${i+1}`;
+
+          const lbl = document.createElement('span');
+          lbl.style.cssText = 'flex:1;font-size:11px;color:var(--text-dim)';
+          lbl.textContent = `Marker ${i + 1}`;
+
+          const del = document.createElement('button');
+          del.className = 'msr-pnl-del'; del.textContent = '×'; del.title = 'Delete this marker';
+          del.addEventListener('click', e => {
+            e.stopPropagation();
+            m.points.splice(i, 1);
+            if (!m.points.length) measurementsByPage[currentPage] = measurementsByPage[currentPage].filter(x => x.id !== m.id);
+            if (msrSelectedId === m.id) { msrSelectedPtIdx = -1; }
+            redrawRegions();
+          });
+
+          sub.addEventListener('click', () => { msrSelectedId = m.id; msrSelectedPtIdx = i; redrawRegions(); });
+          sub.appendChild(ico); sub.appendChild(lbl); sub.appendChild(del);
+          listEl.appendChild(sub);
+        });
+      }
+    });
+  }
+}
+
+function msrPnlSection(title) {
+  const el = document.createElement('div');
+  el.className = 'msr-pnl-section';
+  el.textContent = title;
+  return el;
+}
+
+function msrPnlRow(icon, obj, fallbackVal, valueStr, isSel, onSelect, onDelete) {
+  const row = document.createElement('div');
+  row.className = 'msr-pnl-row' + (isSel ? ' is-sel' : '');
+
+  const ico = document.createElement('span');
+  ico.className = 'msr-pnl-icon'; ico.textContent = icon;
+
+  const name = document.createElement('input');
+  name.type = 'text'; name.className = 'msr-pnl-name';
+  name.placeholder = 'Name…';
+  name.value = obj.label || '';
+  name.addEventListener('click', e => e.stopPropagation());
+  name.addEventListener('input', () => { obj.label = name.value; msrRedrawOnly(); });
+
+  const val = document.createElement('span');
+  val.className = 'msr-pnl-val';
+  val.textContent = valueStr || fallbackVal || '';
+
+  const del = document.createElement('button');
+  del.className = 'msr-pnl-del'; del.textContent = '×'; del.title = 'Delete';
+  del.addEventListener('click', e => { e.stopPropagation(); onDelete(); });
+
+  row.addEventListener('click', onSelect);
+  row.appendChild(ico); row.appendChild(name); row.appendChild(val); row.appendChild(del);
+  return row;
 }
 
 function msrUpdateScaleLabel() {
@@ -2815,6 +3438,67 @@ function msrUpdateScaleLabel() {
     : `${zones.length} scale zones`;
 }
 
+// ── App mode toggle (Extract / Measure) ─────────────────────────────────────
+function setAppMode(mode) {
+  const app = document.getElementById('app');
+  if (!app) return;
+  app.classList.toggle('mode-extract', mode === 'extract');
+  app.classList.toggle('mode-measure', mode === 'measure');
+  document.getElementById('btn-mode-extract')?.classList.toggle('is-active', mode === 'extract');
+  document.getElementById('btn-mode-measure')?.classList.toggle('is-active', mode === 'measure');
+  const hud = document.getElementById('snap-hud');
+  if (mode === 'extract') {
+    currentTool = 'select';
+    msrActiveDrawPts = [];
+    msrPreviewPt = null;
+    document.querySelectorAll('.btn-tool').forEach(b => b.classList.remove('is-active'));
+    document.getElementById('tool-select')?.classList.add('is-active');
+    if (overlay) overlay.classList.add('tool-select');
+    if (hud) hud.style.display = 'none';
+  } else {
+    if (overlay) overlay.classList.add('tool-select');
+    if (hud) hud.style.display = 'block';
+    snapHudUpdateCount();
+  }
+}
+document.getElementById('btn-mode-extract')?.addEventListener('click', () => setAppMode('extract'));
+document.getElementById('btn-mode-measure')?.addEventListener('click', () => setAppMode('measure'));
+
+// ── Measurement panel resize handle ─────────────────────────────────────────
+(function initMsrPanelResizer() {
+  const resizer = document.getElementById('msr-pnl-resizer');
+  const panel   = document.getElementById('msr-panel');
+  if (!resizer || !panel) return;
+
+  const MIN_WIDTH = 160, MAX_WIDTH = 400;
+  let isResizing = false, startX = 0, startWidth = 0;
+
+  resizer.addEventListener('mousedown', (e) => {
+    isResizing = true;
+    startX = e.clientX;
+    startWidth = panel.offsetWidth;
+    resizer.classList.add('is-resizing');
+    document.body.style.cursor = 'ew-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!isResizing) return;
+    const newWidth = Math.min(Math.max(startWidth - (e.clientX - startX), MIN_WIDTH), MAX_WIDTH);
+    panel.style.width = newWidth + 'px';
+    panel.style.flex = `0 0 ${newWidth}px`;
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (!isResizing) return;
+    isResizing = false;
+    resizer.classList.remove('is-resizing');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  });
+})();
+
 // ── Sidebar resize handle ────────────────────────────────────────────────────
 (function initSidebarResizer() {
   const resizer = document.getElementById('sidebar-resizer');
@@ -2822,7 +3506,7 @@ function msrUpdateScaleLabel() {
   if (!resizer || !sidebarEl) return;
 
   const MIN_WIDTH = 80;
-  const MAX_WIDTH = 340;
+  const MAX_WIDTH = 520;
 
   let isResizing = false;
   let startX = 0;
